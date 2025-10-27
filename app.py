@@ -41,8 +41,9 @@ if 'analytics' not in st.session_state:
 @st.cache_resource
 def load_surya_models():
     """Load Surya OCR models (cached to avoid reloading)"""
+    foundation_predictor = FoundationPredictor()
     det_predictor = DetectionPredictor()
-    rec_predictor = RecognitionPredictor()
+    rec_predictor = RecognitionPredictor(foundation_predictor)
     return det_predictor, rec_predictor
 
 @st.cache_data
@@ -60,15 +61,15 @@ def extract_text_with_surya(pdf_file_contents):
     
     for i, img in enumerate(images):
         # Run detection
-        det_result = det_predictor([img])
+        det_result = det_predictor([img], ["bn"])  # Specify Bengali language
         
         # Run recognition on detected text regions
-        rec_result = rec_predictor(det_result, [img])
+        rec_result = rec_predictor(det_result, [img], ["bn"])
         
         # Extract text
         page_text = ""
-        for line in rec_result[0]:
-            page_text += line.text + " "
+        for text_line in rec_result[0].text_lines:
+            page_text += text_line.text + " "
         
         full_text += page_text + "\n"
         
