@@ -15,10 +15,9 @@ from collections import defaultdict
 import nltk
 from rank_bm25 import BM25Okapi
 import re
-from surya.model.detection import model as detection_model  # NOT segformer
-from surya.model.recognition.model import load_model
-from surya.model.recognition.processor import load_processor
-from surya.ocr import run_ocr
+from surya.recognition import RecognitionPredictor
+from surya.detection import DetectionPredictor  
+from surya.foundation import FoundationPredictor
 from PIL import Image
 
 # Download required NLTK data
