@@ -18,7 +18,7 @@ from surya.recognition import RecognitionPredictor
 from surya.detection import DetectionPredictor
 from surya.foundation import FoundationPredictor
 from PIL import Image
-import fitz  # PyMuPDF
+import fitz
 
 # Download required NLTK data
 try:
@@ -46,7 +46,7 @@ def load_surya_models():
 def extract_text_with_surya(pdf_path):
     """Extract text from PDF using Surya OCR"""
     det_predictor, rec_predictor = load_surya_models()
-
+    
     # Read PDF file from path
     if isinstance(pdf_path, str):
         # It's a file path, read it
@@ -58,19 +58,22 @@ def extract_text_with_surya(pdf_path):
     else:
         # It's already bytes
         pdf_bytes = pdf_path
-
+    
     images = convert_from_bytes(pdf_bytes)
+    
     full_text = ""
-
     for i, img in enumerate(images):
         det_result = det_predictor([img], ["bn"])
         rec_result = rec_predictor(det_result, [img], ["bn"])
+        
         page_text = ""
         for text_line in rec_result[0].text_lines:
             page_text += text_line.text + " "
+        
         full_text += page_text + "\n"
-
+    
     return full_text
+
 
 # ==================== TTS MODULE ====================
 def load_tts_model():
@@ -86,15 +89,19 @@ def generate_audio(text, max_length=1000):
     """Generate audio from text"""
     try:
         model, tokenizer = load_tts_model()
+
         if len(text) > max_length:
             text = text[:max_length] + "..."
+
         inputs = tokenizer(text, return_tensors="pt")
         with torch.no_grad():
             output = model(**inputs).waveform
+
         waveform = output.squeeze().cpu().numpy()
         audio_buffer = io.BytesIO()
         wavfile.write(audio_buffer, rate=16000, data=(waveform * 32767).astype(np.int16))
         audio_buffer.seek(0)
+
         return audio_buffer.read()
     except Exception as e:
         return None
@@ -141,7 +148,7 @@ def hybrid_search(dense_index, sparse_index, embedder, question, chunks, k=3, al
     question_embedding = embedder.encode([question])
     dense_distances, dense_indices = dense_index.search(
         np.array(question_embedding).astype('float32'), k*2
-    )  # ✅ FIXED
+    )
 
     tokenized_question = question.split()
     sparse_scores = sparse_index.get_scores(tokenized_question)
@@ -185,7 +192,7 @@ def load_summarization_model():
                 "summarization",
                 model="csebuetnlp/mT5_multilingual_XLSum",
                 tokenizer="csebuetnlp/mT5_multilingual_XLSum"
-            )  # ✅ FIXED
+            )  # ✅ Add closing parenthesis
         except:
             summarization_model = None
     return summarization_model
@@ -204,48 +211,48 @@ def generate_summary(text, max_length=200, min_length=50):
             max_length=max_length,
             min_length=min_length,
             do_sample=False
-        )  # ✅ FIXED
+        )  # ✅ Add closing parenthesis
         return summary[0]['summary_text']
     except Exception as e:
         return f"Error: {str(e)}"
-
 # ==================== GRADIO INTERFACE FUNCTIONS ====================
 def process_pdf(pdf_file, progress=gr.Progress()):
     """Process uploaded PDF"""
     if pdf_file is None:
         return "❌ Please upload a PDF", None, gr.update(visible=False)
-
+    
     try:
         # Get file path from Gradio file object
         pdf_path = pdf_file.name if hasattr(pdf_file, 'name') else str(pdf_file)
-
+        
         # Open PDF to verify it's valid
         doc = fitz.open(pdf_path)
         doc.close()
-
+        
         progress(0, desc="Extracting text from PDF...")
+        
+        # ✅ FIX: Use pdf_path here!
         text = extract_text_with_surya(pdf_path)
-
+        
         progress(0.5, desc="Setting up RAG pipeline...")
         chunks = semantic_chunk_text(text)
         dense_idx, sparse_idx, embedder = setup_rag_pipeline(chunks)
-
+        
         progress(1.0, desc="Done!")
-
+        
         # Store in state (return as JSON string)
         state = {
             "text": text,
             "chunks": chunks,
             "processed": True
-        }  # ✅ FIXED
-
+        }
+        
         return (
             f"✅ Successfully extracted {len(text)} characters from PDF.\n\n"
             f"📄 Preview:\n{text[:500]}...",
             json.dumps(state),
             gr.update(visible=True)
-        )  # ✅ FIXED
-
+        )
     except Exception as e:
         return f"❌ Error processing PDF: {str(e)}", None, gr.update(visible=False)
 
@@ -267,7 +274,6 @@ def answer_question(question, state_json, num_chunks, alpha):
             dense_idx, sparse_idx, embedder, question, chunks,
             k=int(num_chunks), alpha=alpha
         )
-
         context = "\n---\n".join(relevant_chunks)
 
         # Get answer
@@ -284,7 +290,6 @@ def answer_question(question, state_json, num_chunks, alpha):
         response += f"📚 **Retrieved Context:**\n{context[:300]}..."
 
         return response, audio_data
-
     except Exception as e:
         return f"❌ Error: {str(e)}", None
 
@@ -306,7 +311,6 @@ def generate_summary_fn(state_json, length):
         audio_data = generate_audio(summary)
 
         return f"📝 **Summary:**\n\n{summary}", audio_data
-
     except Exception as e:
         return f"❌ Error: {str(e)}", None
 
@@ -323,7 +327,6 @@ def read_aloud(state_json):
         audio_data = generate_audio(text[:1000])
 
         return "🎵 Audio generated for first 1000 characters.", audio_data
-
     except Exception as e:
         return f"❌ Error: {str(e)}", None
 
@@ -341,9 +344,11 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Bengali PDF Assistant") as app:
         with gr.Column():
             pdf_input = gr.File(label="📄 Upload Bengali PDF", file_types=[".pdf"])
             process_btn = gr.Button("🔬 Process PDF", variant="primary")
+
             output_text = gr.Textbox(label="Processing Status", lines=10)
 
     tabs_group = gr.Group(visible=False)
+
     with tabs_group:
         with gr.Tabs():
             # Tab 1: Q&A
@@ -354,6 +359,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Bengali PDF Assistant") as app:
                             label="🔍 Ask a question about your document",
                             placeholder="Type your question here..."
                         )
+
                         with gr.Row():
                             num_chunks = gr.Slider(
                                 label="Number of context chunks",
@@ -363,7 +369,9 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Bengali PDF Assistant") as app:
                                 label="Dense/Sparse balance",
                                 minimum=0.0, maximum=1.0, value=0.5, step=0.1
                             )
+
                         qa_btn = gr.Button("💡 Get Answer", variant="primary")
+
                     with gr.Column():
                         qa_output = gr.Textbox(label="Answer", lines=8)
                         qa_audio = gr.Audio(label="🔊 Listen to Answer")
@@ -378,6 +386,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Bengali PDF Assistant") as app:
                             value="Medium"
                         )
                         summary_btn = gr.Button("📄 Generate Summary", variant="primary")
+
                     with gr.Column():
                         summary_output = gr.Textbox(label="Summary", lines=8)
                         summary_audio = gr.Audio(label="🔊 Listen to Summary")
