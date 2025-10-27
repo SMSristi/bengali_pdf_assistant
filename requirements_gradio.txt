@@ -1,0 +1,12 @@
+gradio
+pdf2image
+transformers
+faiss-cpu
+sentence-transformers
+torch
+scipy
+nltk
+rank-bm25
+surya-ocr
+PyMuPDF
+Pillow
