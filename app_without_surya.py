@@ -1,4 +1,5 @@
 import streamlit as st
+import easyocr
 from pdf2image import convert_from_bytes
 from transformers import pipeline, VitsModel, AutoTokenizer, AutoModelForQuestionAnswering
 import faiss
@@ -15,11 +16,6 @@ from collections import defaultdict
 import nltk
 from rank_bm25 import BM25Okapi
 import re
-from surya.ocr import run_ocr
-from surya.model.detection.model import load_model as load_det_model, load_processor as load_det_processor
-from surya.model.recognition.model import load_model as load_rec_model
-from surya.model.recognition.processor import load_processor as load_rec_processor
-from PIL import Image
 
 # Download required NLTK data
 try:
@@ -38,23 +34,16 @@ if 'analytics' not in st.session_state:
         'query_history': []
     }
 
-# ==================== SURYA OCR MODULE (UPGRADED) ====================
+# ==================== OCR MODULE ====================
 @st.cache_resource
-def load_surya_models():
-    """Load Surya OCR models (cached to avoid reloading)"""
-    det_model = load_det_model()
-    det_processor = load_det_processor()
-    rec_model = load_rec_model()
-    rec_processor = load_rec_processor()
-    return det_model, det_processor, rec_model, rec_processor
+def load_ocr_reader():
+    """Load EasyOCR reader (cached to avoid reloading)"""
+    return easyocr.Reader(['bn', 'en'], gpu=False)
 
 @st.cache_data
-def extract_text_with_surya(pdf_file_contents):
-    """Uses Surya OCR for Bengali text extraction - FASTER & MORE ACCURATE"""
-    # Load models
-    det_model, det_processor, rec_model, rec_processor = load_surya_models()
-
-    # Convert PDF to images
+def extract_text_with_easyocr(pdf_file_contents):
+    """Uses EasyOCR for free Bengali text extraction with progress tracking"""
+    reader = load_ocr_reader()
     images = convert_from_bytes(pdf_file_contents)
 
     full_text = ""
@@ -62,30 +51,14 @@ def extract_text_with_surya(pdf_file_contents):
     status_text = st.empty()
 
     for i, img in enumerate(images):
-        # Surya expects PIL images
-        langs = ["bn", "en"]  # Bengali and English
-
-        # Run OCR
-        predictions = run_ocr(
-            [img],
-            [langs],
-            det_model,
-            det_processor,
-            rec_model,
-            rec_processor
-        )
-
-        # Extract text from predictions
-        page_text = ""
-        for pred in predictions:
-            for text_line in pred.text_lines:
-                page_text += text_line.text + " "
-
+        img_array = np.array(img)
+        results = reader.readtext(img_array, detail=0, paragraph=True)
+        page_text = " ".join(results)
         full_text += page_text + "\n"
 
         progress = (i + 1) / len(images)
         progress_bar.progress(progress)
-        status_text.text(f"✓ Processed page {i+1}/{len(images)}")
+        status_text.text(f"Processed page {i+1}/{len(images)}")
 
     progress_bar.empty()
     status_text.empty()
@@ -335,7 +308,7 @@ def export_results(text, summaries, qa_pairs):
 
 # ==================== MAIN STREAMLIT APP ====================
 st.set_page_config(
-    page_title="Bengali PDF Assistant - Research Edition (Surya OCR)",
+    page_title="Bengali PDF Assistant - Research Edition",
     page_icon="🎓",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -356,9 +329,9 @@ with st.sidebar:
     st.subheader("About")
     st.info("""
     **Research-Grade Features:**
-    - 🔬 Surya OCR (Fast & Accurate)
-    - 🎯 Hybrid RAG (Dense + Sparse)
+    - 🔬 Hybrid RAG (Dense + Sparse)
     - 📊 Performance Analytics
+    - 🎯 Semantic Chunking
     - 📝 Document Summarization
     - 💾 Export Capabilities
     - 📈 Confidence Scoring
@@ -368,22 +341,20 @@ with st.sidebar:
 st.title("🎓 Bengali PDF Assistant - Research Edition")
 st.markdown("""
 **Advanced NLP Pipeline for Bengali Document Analysis**  
-*Features: Surya OCR • Hybrid RAG • Meta MMS-TTS • BanglaBERT QA • Document Summarization • Analytics*
+*Features: Hybrid RAG • Meta MMS-TTS • BanglaBERT QA • Document Summarization • Analytics*
 """)
-
-st.success("✨ **NEW**: Upgraded with Surya OCR - 3x faster, more accurate, and Streamlit Cloud compatible!")
 
 uploaded_file = st.file_uploader("📄 Upload Bengali PDF Document", type="pdf")
 
 if uploaded_file:
     start_time = time.time()
 
-    with st.spinner("🔬 Analyzing document with Surya OCR..."):
+    with st.spinner("🔬 Analyzing document with advanced NLP pipeline..."):
         file_contents = uploaded_file.getvalue()
 
         try:
-            # Extract text with Surya OCR
-            full_text = extract_text_with_surya(file_contents)
+            # Extract text
+            full_text = extract_text_with_easyocr(file_contents)
 
             # Semantic chunking for better context
             reader_chunks = chunk_text_for_reader(full_text, max_chars=audio_speed)
@@ -622,7 +593,7 @@ if uploaded_file:
         st.header("🔬 Technical Details")
         with st.expander("Pipeline Configuration"):
             st.code(f"""
-OCR: Surya OCR (90+ languages including Bengali)
+OCR: EasyOCR (Bengali + English)
 TTS: facebook/mms-tts-ben (Meta MMS-TTS)
 Embeddings: paraphrase-multilingual-MiniLM-L12-v2
 QA Model: csebuetnlp/banglabert
@@ -643,7 +614,7 @@ else:
     with col1:
         st.subheader("🎯 Features")
         st.markdown("""
-        - Surya OCR (Fast & Accurate)
+        - Advanced OCR for Bengali
         - Natural TTS synthesis
         - Hybrid RAG search
         - Question answering
@@ -663,7 +634,7 @@ else:
     with col3:
         st.subheader("🚀 Technologies")
         st.markdown("""
-        - Surya OCR
+        - EasyOCR
         - Meta MMS-TTS
         - BanglaBERT
         - FAISS + BM25
@@ -672,4 +643,4 @@ else:
 
 # Footer
 st.divider()
-st.caption("🎓 Bengali PDF Assistant - Research Edition | Powered by Surya OCR | Built for academic research & accessibility")
+st.caption("🎓 Bengali PDF Assistant - Research Edition | Built for academic research & accessibility")
