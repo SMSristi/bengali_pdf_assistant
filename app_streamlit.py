@@ -14,7 +14,7 @@ import nltk
 from rank_bm25 import BM25Okapi
 import re
 from PIL import Image
-import fitz  # PyMuPDF
+import fitz
 from google.cloud import vision
 import os
 
