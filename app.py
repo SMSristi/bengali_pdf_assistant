@@ -41,51 +41,41 @@ if 'analytics' not in st.session_state:
 @st.cache_resource
 def load_surya_models():
     """Load Surya OCR models (cached to avoid reloading)"""
-    det_model = load_det_model()
-    det_processor = load_det_processor()
-    rec_model = load_rec_model()
-    rec_processor = load_rec_processor()
-    return det_model, det_processor, rec_model, rec_processor
+    det_predictor = DetectionPredictor()
+    rec_predictor = RecognitionPredictor()
+    return det_predictor, rec_predictor
 
 @st.cache_data
 def extract_text_with_surya(pdf_file_contents):
     """Uses Surya OCR for Bengali text extraction - FASTER & MORE ACCURATE"""
     # Load models
-    det_model, det_processor, rec_model, rec_processor = load_surya_models()
-
+    det_predictor, rec_predictor = load_surya_models()
+    
     # Convert PDF to images
     images = convert_from_bytes(pdf_file_contents)
-
+    
     full_text = ""
     progress_bar = st.progress(0)
     status_text = st.empty()
-
+    
     for i, img in enumerate(images):
-        # Surya expects PIL images
-        langs = ["bn", "en"]  # Bengali and English
-
-        # Run OCR
-        predictions = run_ocr(
-            [img],
-            [langs],
-            det_model,
-            det_processor,
-            rec_model,
-            rec_processor
-        )
-
-        # Extract text from predictions
+        # Run detection
+        det_result = det_predictor([img])
+        
+        # Run recognition on detected text regions
+        rec_result = rec_predictor(det_result, [img])
+        
+        # Extract text
         page_text = ""
-        for pred in predictions:
-            for text_line in pred.text_lines:
-                page_text += text_line.text + " "
-
+        for line in rec_result[0]:
+            page_text += line.text + " "
+        
         full_text += page_text + "\n"
-
+        
         progress = (i + 1) / len(images)
         progress_bar.progress(progress)
         status_text.text(f"✓ Processed page {i+1}/{len(images)}")
-
+    
     progress_bar.empty()
     status_text.empty()
     return full_text
