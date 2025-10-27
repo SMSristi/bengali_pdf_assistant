@@ -14,9 +14,6 @@ from datetime import datetime
 import nltk
 from rank_bm25 import BM25Okapi
 import re
-from surya.recognition import RecognitionPredictor
-from surya.detection import DetectionPredictor
-from surya.foundation import FoundationPredictor
 from PIL import Image
 import fitz  # PyMuPDF
 
@@ -37,40 +34,65 @@ def load_surya_models():
     """Load Surya OCR models (cached)"""
     global ocr_models
     if ocr_models is None:
-        foundation_predictor = FoundationPredictor()
-        det_predictor = DetectionPredictor()
-        rec_predictor = RecognitionPredictor(foundation_predictor)
-        ocr_models = (det_predictor, rec_predictor)
+        # ✅ CORRECT imports for latest Surya
+        from surya.model.detection.model import load_model as load_detection_model
+        from surya.model.detection.model import load_processor as load_detection_processor
+        from surya.model.recognition.model import load_model as load_recognition_model
+        from surya.model.recognition.processor import load_processor as load_recognition_processor
+        
+        det_model = load_detection_model()
+        det_processor = load_detection_processor()
+        rec_model = load_recognition_model()
+        rec_processor = load_recognition_processor()
+        
+        ocr_models = {
+            'det_model': det_model,
+            'det_processor': det_processor,
+            'rec_model': rec_model,
+            'rec_processor': rec_processor
+        }
     return ocr_models
 
 def extract_text_with_surya(pdf_path):
     """Extract text from PDF using Surya OCR"""
-    det_predictor, rec_predictor = load_surya_models()
-
+    from surya.ocr import run_ocr
+    
+    models = load_surya_models()
+    
     # Read PDF file from path
     if isinstance(pdf_path, str):
-        # It's a file path, read it
         with open(pdf_path, 'rb') as f:
             pdf_bytes = f.read()
     elif hasattr(pdf_path, 'read'):
-        # It's a file object
         pdf_bytes = pdf_path.read()
     else:
-        # It's already bytes
         pdf_bytes = pdf_path
-
+    
+    # Convert PDF to images
     images = convert_from_bytes(pdf_bytes)
+    
+    # Prepare language list (one list per image)
+    langs = [["bn"]] * len(images)  # Must be list of lists
+    
+    # Run OCR on all images
+    predictions = run_ocr(
+        images,
+        langs,
+        models['det_model'],
+        models['det_processor'],
+        models['rec_model'],
+        models['rec_processor']
+    )
+    
+    # Extract text from predictions
     full_text = ""
-
-    for i, img in enumerate(images):
-        det_result = det_predictor([img], ["bn"])
-        rec_result = rec_predictor(det_result, [img], ["bn"])
+    for page_result in predictions:
         page_text = ""
-        for text_line in rec_result[0].text_lines:
+        for text_line in page_result.text_lines:
             page_text += text_line.text + " "
-        full_text += page_text + "\n"
-
-    return full_text
+        full_text += page_text.strip() + "\n\n"
+    
+    return full_text.strip()
 
 # ==================== TTS MODULE ====================
 def load_tts_model():
