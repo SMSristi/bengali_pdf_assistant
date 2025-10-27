@@ -54,6 +54,34 @@ def load_surya_models():
     return ocr_models
 
 def extract_text_with_surya(pdf_path):
+    """Extract text from PDF using Surya OCR"""
+    det_predictor, rec_predictor = load_surya_models()
+
+    # Read PDF file from path
+    if isinstance(pdf_path, str):
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+    elif hasattr(pdf_path, 'read'):
+        pdf_bytes = pdf_path.read()
+    else:
+        pdf_bytes = pdf_path
+
+    images = convert_from_bytes(pdf_bytes)
+    
+    # ✅ CORRECT WAY: Pass detection predictor as parameter
+    predictions = rec_predictor(images, det_predictor=det_predictor)
+    
+    # Extract text
+    full_text = ""
+    for page_result in predictions:
+        page_text = ""
+        if hasattr(page_result, 'text_lines'):
+            for text_line in page_result.text_lines:
+                page_text += text_line.text + " "
+        full_text += page_text.strip() + "\n\n"
+    
+    return full_text.strip()
+
     """Extract text from PDF using Surya OCR v0.17.0"""
     # ✅ Import the actual OCR function from correct location
     from surya.recognition import batch_recognition
