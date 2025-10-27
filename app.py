@@ -14,6 +14,7 @@ from datetime import datetime
 import nltk
 from rank_bm25 import BM25Okapi
 import re
+import fitz
 from surya.recognition import RecognitionPredictor
 from surya.detection import DetectionPredictor
 from surya.foundation import FoundationPredictor
@@ -191,7 +192,7 @@ def load_summarization_model():
                 "summarization",
                 model="csebuetnlp/mT5_multilingual_XLSum",
                 tokenizer="csebuetnlp/mT5_multilingual_XLSum"
-            )
+            )  # ✅ Add closing parenthesis
         except:
             summarization_model = None
     return summarization_model
@@ -201,22 +202,19 @@ def generate_summary(text, max_length=200, min_length=50):
     summarizer = load_summarization_model()
     if summarizer is None:
         return "Summarization model not available."
-
     try:
         max_input = 1024
         if len(text) > max_input:
             text = text[:max_input]
-
         summary = summarizer(
             text,
             max_length=max_length,
             min_length=min_length,
             do_sample=False
-        )
+        )  # ✅ Add closing parenthesis
         return summary[0]['summary_text']
     except Exception as e:
         return f"Error: {str(e)}"
-
 # ==================== GRADIO INTERFACE FUNCTIONS ====================
 def process_pdf(pdf_file, progress=gr.Progress()):
     """Process uploaded PDF"""
