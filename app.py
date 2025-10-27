@@ -14,11 +14,11 @@ from datetime import datetime
 import nltk
 from rank_bm25 import BM25Okapi
 import re
-import fitz
 from surya.recognition import RecognitionPredictor
 from surya.detection import DetectionPredictor
 from surya.foundation import FoundationPredictor
 from PIL import Image
+import fitz
 
 # Download required NLTK data
 try:
