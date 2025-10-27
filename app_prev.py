@@ -430,3 +430,4 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Bengali PDF Assistant") as app:
 
 if __name__ == "__main__":
     app.launch()
+
