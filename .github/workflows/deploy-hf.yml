@@ -1,0 +1,38 @@
+name: Deploy to HuggingFace
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.pdf'
+      - '**.jpg'
+      - '**.png'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      
+      - name: Deploy to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global user.email "bot@huggingface.co"
+          git config --global user.name "HF Deploy Bot"
+          
+          # Remove any binary files
+          find . -name "*.pdf" -type f -delete
+          find . -name "*.jpg" -type f -delete
+          find . -name "*.png" -type f -delete
+          
+          # Add all changes
+          git add -A
+          git commit -m "Deploy from GitHub" || echo "No changes to commit"
+          
+          # Push to HF Space
+          git push https://Sristi222:$HF_TOKEN@huggingface.co/spaces/Sristi222/bangla-pdf-assistant main --force
