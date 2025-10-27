@@ -29,19 +29,19 @@ tts_models = None
 qa_model = None
 summarization_model = None
 
-# ==================== SURYA OCR MODULE ====================
+# ==================== SURYA OCR MODULE (v0.17.0) ====================
 def load_surya_models():
     """Load Surya OCR models (cached)"""
     global ocr_models
     if ocr_models is None:
-        # ✅ CORRECT imports for latest Surya
-        from surya.model.detection.model import load_model as load_detection_model
-        from surya.model.detection.model import load_processor as load_detection_processor
+        # ✅ CORRECT imports for Surya 0.17.0
+        from surya.model.detection.segformer import load_model as load_detection_model
+        from surya.model.detection.segformer import load_processor as load_detection_processor
         from surya.model.recognition.model import load_model as load_recognition_model
         from surya.model.recognition.processor import load_processor as load_recognition_processor
         
-        det_model = load_detection_model()
         det_processor = load_detection_processor()
+        det_model = load_detection_model()
         rec_model = load_recognition_model()
         rec_processor = load_recognition_processor()
         
@@ -54,12 +54,15 @@ def load_surya_models():
     return ocr_models
 
 def extract_text_with_surya(pdf_path):
-    """Extract text from PDF using Surya OCR"""
-    from surya.ocr import run_ocr
+    """Extract text from PDF using Surya OCR v0.17.0"""
+    # ✅ Import the actual OCR function from correct location
+    from surya.recognition import batch_recognition
+    from surya.detection import batch_detection
+    from surya.input.processing import convert_if_not_rgb
     
     models = load_surya_models()
     
-    # Read PDF file from path
+    # Read PDF file
     if isinstance(pdf_path, str):
         with open(pdf_path, 'rb') as f:
             pdf_bytes = f.read()
@@ -71,25 +74,35 @@ def extract_text_with_surya(pdf_path):
     # Convert PDF to images
     images = convert_from_bytes(pdf_bytes)
     
-    # Prepare language list (one list per image)
-    langs = [["bn"]] * len(images)  # Must be list of lists
+    # Convert to RGB if needed
+    images = [convert_if_not_rgb(img) for img in images]
     
-    # Run OCR on all images
-    predictions = run_ocr(
+    # Language for each image
+    langs = [["bn"]] * len(images)
+    
+    # Step 1: Detect text lines
+    line_predictions = batch_detection(
         images,
-        langs,
         models['det_model'],
-        models['det_processor'],
-        models['rec_model'],
-        models['rec_processor']
+        models['det_processor']
     )
     
-    # Extract text from predictions
+    # Step 2: Recognize text from detected lines
+    text_predictions = batch_recognition(
+        images,
+        langs,
+        models['rec_model'],
+        models['rec_processor'],
+        bboxes=line_predictions
+    )
+    
+    # Extract text
     full_text = ""
-    for page_result in predictions:
+    for page_result in text_predictions:
         page_text = ""
-        for text_line in page_result.text_lines:
-            page_text += text_line.text + " "
+        if hasattr(page_result, 'text_lines'):
+            for text_line in page_result.text_lines:
+                page_text += text_line.text + " "
         full_text += page_text.strip() + "\n\n"
     
     return full_text.strip()
