@@ -210,7 +210,13 @@ def generate_summary(text, max_length=200, min_length=50):
 def process_pdf(pdf_file, progress=gr.Progress()):
     """Process uploaded PDF"""
     if pdf_file is None:
-        return "Please upload a PDF file.", None, None
+        return "❌ Please upload a PDF", None
+    
+    # Get file path from Gradio file object
+    pdf_path = pdf_file.name if hasattr(pdf_file, 'name') else str(pdf_file)
+    
+    # NOW use pdf_path everywhere instead of pdf_file
+    doc = fitz.open(pdf_path)
 
     progress(0, desc="Extracting text from PDF...")
     try:
