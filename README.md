@@ -1,4 +1,15 @@
-# Bengali PDF Assistant - Research Edition
+---
+title: Bengali PDF Assistant
+emoji: 📄
+colorFrom: blue
+colorTo: green
+sdk: gradio
+sdk_version: 4.44.0
+app_file: app.py
+pinned: false
+---
+
+# Bengali PDF Assistant
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](YOUR_DEPLOYED_URL_HERE)
 
