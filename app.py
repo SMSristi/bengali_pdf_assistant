@@ -42,26 +42,37 @@ def load_surya_models():
         ocr_models = (det_predictor, rec_predictor)
     return ocr_models
 
-def extract_text_with_surya(pdf_file):
+def extract_text_with_surya(pdf_path):
     """Extract text from PDF using Surya OCR"""
     det_predictor, rec_predictor = load_surya_models()
-
-    # Read PDF file
-    pdf_bytes = pdf_file.read() if hasattr(pdf_file, 'read') else pdf_file
+    
+    # Read PDF file from path
+    if isinstance(pdf_path, str):
+        # It's a file path, read it
+        with open(pdf_path, 'rb') as f:
+            pdf_bytes = f.read()
+    elif hasattr(pdf_path, 'read'):
+        # It's a file object
+        pdf_bytes = pdf_path.read()
+    else:
+        # It's already bytes
+        pdf_bytes = pdf_path
+    
     images = convert_from_bytes(pdf_bytes)
-
+    
     full_text = ""
     for i, img in enumerate(images):
         det_result = det_predictor([img], ["bn"])
         rec_result = rec_predictor(det_result, [img], ["bn"])
-
+        
         page_text = ""
         for text_line in rec_result[0].text_lines:
             page_text += text_line.text + " "
-
+        
         full_text += page_text + "\n"
-
+    
     return full_text
+
 
 # ==================== TTS MODULE ====================
 def load_tts_model():
@@ -210,31 +221,34 @@ def generate_summary(text, max_length=200, min_length=50):
 def process_pdf(pdf_file, progress=gr.Progress()):
     """Process uploaded PDF"""
     if pdf_file is None:
-        return "❌ Please upload a PDF", None
+        return "❌ Please upload a PDF", None, gr.update(visible=False)
     
-    # Get file path from Gradio file object
-    pdf_path = pdf_file.name if hasattr(pdf_file, 'name') else str(pdf_file)
-    
-    # NOW use pdf_path everywhere instead of pdf_file
-    doc = fitz.open(pdf_path)
-
-    progress(0, desc="Extracting text from PDF...")
     try:
-        text = extract_text_with_surya(pdf_file)
-
+        # Get file path from Gradio file object
+        pdf_path = pdf_file.name if hasattr(pdf_file, 'name') else str(pdf_file)
+        
+        # Open PDF to verify it's valid
+        doc = fitz.open(pdf_path)
+        doc.close()
+        
+        progress(0, desc="Extracting text from PDF...")
+        
+        # ✅ FIX: Use pdf_path here!
+        text = extract_text_with_surya(pdf_path)
+        
         progress(0.5, desc="Setting up RAG pipeline...")
         chunks = semantic_chunk_text(text)
         dense_idx, sparse_idx, embedder = setup_rag_pipeline(chunks)
-
+        
         progress(1.0, desc="Done!")
-
+        
         # Store in state (return as JSON string)
         state = {
             "text": text,
             "chunks": chunks,
             "processed": True
         }
-
+        
         return (
             f"✅ Successfully extracted {len(text)} characters from PDF.\n\n"
             f"📄 Preview:\n{text[:500]}...",
