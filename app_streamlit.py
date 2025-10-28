@@ -649,7 +649,7 @@ def main():
 
         with tabs[3]:
             st.subheader("📄 Full Extracted Text")
-            st.text_area("", st.session_state.processed_text, height=400)
+            st.text_area("Document Text", st.session_state.processed_text, height=400, label_visibility="hidden")
 
 if __name__ == "__main__":
     main()
