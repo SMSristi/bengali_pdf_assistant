@@ -17,7 +17,6 @@ from PIL import Image, ImageDraw
 from google.cloud import vision
 from google.oauth2 import service_account
 import os
-from pydub import AudioSegment  # ✅ NEW: For combining audio
 
 # Download NLTK data
 try:
@@ -180,6 +179,7 @@ def load_tts_model():
             st.session_state.tts_model = (model, tokenizer)
     return st.session_state.tts_model
 
+
 def generate_audio(text, max_length=1500):
     """Generate audio from text (single chunk)"""
     try:
@@ -198,7 +198,40 @@ def generate_audio(text, max_length=1500):
         st.error(f"TTS Error: {str(e)}")
         return None
 
-# ✅ NEW: Generate audio for long text with chunking
+
+def combine_wav_files(audio_bytes_list):
+    '''Combine WAV files using scipy + numpy'''
+    try:
+        combined_audio = []
+        sample_rate = 16000
+        
+        for audio_bytes in audio_bytes_list:
+            audio_io = io.BytesIO(audio_bytes)
+            sr, audio_data = wavfile.read(audio_io)
+            combined_audio.append(audio_data)
+            
+            # Add 300ms silence between chunks
+            silence = np.zeros(int(0.3 * sr), dtype=audio_data.dtype)
+            combined_audio.append(silence)
+        
+        # Remove last silence
+        if combined_audio:
+            combined_audio = combined_audio[:-1]
+        
+        # Concatenate all audio
+        final_audio = np.concatenate(combined_audio)
+        
+        # Write to bytes
+        output = io.BytesIO()
+        wavfile.write(output, sample_rate, final_audio)
+        output.seek(0)
+        return output.read()
+    except Exception as e:
+        st.error(f"Combine error: {str(e)}")
+        return None
+
+
+# ✅ FIXED: Generate audio for long text with chunking
 def generate_audio_chunked(text, chunk_size=1500):
     """Split long text into chunks and combine audio"""
     try:
@@ -214,41 +247,29 @@ def generate_audio_chunked(text, chunk_size=1500):
                 if last_period > chunk_size * 0.7:  # At least 70% through
                     chunk = chunk[:last_period+1]
             chunks.append(chunk)
-
+        
         # Generate audio for each chunk
-        audio_segments = []
+        audio_bytes_list = []  # ✅ FIXED: Initialize list
         for i, chunk in enumerate(chunks):
             st.caption(f"Generating audio: chunk {i+1}/{len(chunks)}...")
             audio_bytes = generate_audio(chunk, max_length=chunk_size)
             if audio_bytes:
-                # Convert to AudioSegment
-                audio_segment = AudioSegment.from_wav(io.BytesIO(audio_bytes))
-                audio_segments.append(audio_segment)
-
-                # Add small pause between chunks
-                if i < len(chunks) - 1:
-                    silence = AudioSegment.silent(duration=300)  # 300ms pause
-                    audio_segments.append(silence)
-
-        if not audio_segments:
+                audio_bytes_list.append(audio_bytes)  # ✅ FIXED: Just append bytes
+        
+        if not audio_bytes_list:  # ✅ FIXED: Check audio_bytes_list, not audio_segments
             return None
-
-        # Combine all segments
+        
+        # Combine all segments using scipy
         st.caption("Combining audio segments...")
-        combined_audio = sum(audio_segments)
-
-        # Export to bytes
-        output_buffer = io.BytesIO()
-        combined_audio.export(output_buffer, format='wav')
-        output_buffer.seek(0)
-
-        return output_buffer.read()
-
+        combined_audio = combine_wav_files(audio_bytes_list)  # ✅ FIXED: Use our function
+        
+        return combined_audio
+        
     except Exception as e:
         st.error(f"Chunked audio error: {str(e)}")
         return None
 
-# ==================== CHUNKING ====================
+#==================== CHUNKING ====================
 def semantic_chunk_text(text, max_chunk_size=1000):
     """Semantic chunking"""
     sentences = re.split(r'[।.!?]\s+', text)
