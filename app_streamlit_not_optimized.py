@@ -17,7 +17,6 @@ from PIL import Image, ImageDraw
 from google.cloud import vision
 from google.oauth2 import service_account
 import os
-from pydub import AudioSegment  # ✅ NEW: For combining audio
 
 # Download NLTK data
 try:
@@ -94,6 +93,7 @@ def extract_text_with_google_vision(pdf_path):
                 page_text = response.full_text_annotation.text
                 full_text += page_text + "\n\n"
 
+                # Extract paragraph boxes
                 for page in response.full_text_annotation.pages:
                     for block in page.blocks:
                         for paragraph in block.paragraphs:
@@ -119,6 +119,7 @@ def extract_text_with_google_vision(pdf_path):
         st.error(f"Error during OCR: {str(e)}")
         return "", [], []
 
+# ✅ NEW: Match sentences to paragraph boxes
 def match_sentences_to_boxes(sentences, paragraph_boxes):
     """Match each sentence to its containing paragraph's bounding box"""
     matched_boxes = []
@@ -127,6 +128,7 @@ def match_sentences_to_boxes(sentences, paragraph_boxes):
         best_match = None
         best_score = 0
 
+        # Find paragraph that contains this sentence
         for para in paragraph_boxes:
             if sentence.strip() in para['text']:
                 score = len(sentence) / max(len(para['text']), 1)
@@ -170,7 +172,7 @@ def draw_highlight_on_image(image, bounding_box, color=(255, 255, 0, 100)):
 
     return img_copy
 
-# ==================== TTS MODULE WITH CHUNKING ====================
+# ==================== TTS MODULE ====================
 def load_tts_model():
     """Load TTS model only when needed"""
     if 'tts_model' not in st.session_state:
@@ -180,8 +182,8 @@ def load_tts_model():
             st.session_state.tts_model = (model, tokenizer)
     return st.session_state.tts_model
 
-def generate_audio(text, max_length=1500):
-    """Generate audio from text (single chunk)"""
+def generate_audio(text, max_length=2000):
+    """Generate audio from text"""
     try:
         model, tokenizer = load_tts_model()
         if len(text) > max_length:
@@ -196,56 +198,6 @@ def generate_audio(text, max_length=1500):
         return audio_buffer.read()
     except Exception as e:
         st.error(f"TTS Error: {str(e)}")
-        return None
-
-# ✅ NEW: Generate audio for long text with chunking
-def generate_audio_chunked(text, chunk_size=1500):
-    """Split long text into chunks and combine audio"""
-    try:
-        # Split into chunks
-        chunks = []
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i+chunk_size]
-            # Try to break at sentence boundary
-            if i+chunk_size < len(text):
-                last_period = chunk.rfind('।')
-                if last_period == -1:
-                    last_period = chunk.rfind('.')
-                if last_period > chunk_size * 0.7:  # At least 70% through
-                    chunk = chunk[:last_period+1]
-            chunks.append(chunk)
-
-        # Generate audio for each chunk
-        audio_segments = []
-        for i, chunk in enumerate(chunks):
-            st.caption(f"Generating audio: chunk {i+1}/{len(chunks)}...")
-            audio_bytes = generate_audio(chunk, max_length=chunk_size)
-            if audio_bytes:
-                # Convert to AudioSegment
-                audio_segment = AudioSegment.from_wav(io.BytesIO(audio_bytes))
-                audio_segments.append(audio_segment)
-
-                # Add small pause between chunks
-                if i < len(chunks) - 1:
-                    silence = AudioSegment.silent(duration=300)  # 300ms pause
-                    audio_segments.append(silence)
-
-        if not audio_segments:
-            return None
-
-        # Combine all segments
-        st.caption("Combining audio segments...")
-        combined_audio = sum(audio_segments)
-
-        # Export to bytes
-        output_buffer = io.BytesIO()
-        combined_audio.export(output_buffer, format='wav')
-        output_buffer.seek(0)
-
-        return output_buffer.read()
-
-    except Exception as e:
-        st.error(f"Chunked audio error: {str(e)}")
         return None
 
 # ==================== CHUNKING ====================
@@ -323,55 +275,48 @@ def load_qa_model():
             st.session_state.qa_model = pipeline('question-answering', model=model, tokenizer=tokenizer)
     return st.session_state.qa_model
 
-# ==================== SUMMARIZATION (COMMENTED OUT) ====================
-# ❌ COMMENTED OUT TO SAVE 500MB MEMORY
-# def load_summarization_model():
-#     if 'summarizer' not in st.session_state:
-#         with st.spinner("Loading summarization model (8-bit)..."):
-#             try:
-#                 st.session_state.summarizer = pipeline(
-#                     "summarization",
-#                     model="csebuetnlp/mT5_multilingual_XLSum",
-#                     device_map="auto",
-#                     load_in_8bit=True,
-#                     model_kwargs={"torch_dtype": torch.float16}
-#                 )
-#             except:
-#                 st.session_state.summarizer = None
-#     return st.session_state.summarizer
+# ==================== SUMMARIZATION ====================
+def load_summarization_model():
+    if 'summarizer' not in st.session_state:
+        with st.spinner("Loading summarization model (8-bit)..."):
+            try:
+                st.session_state.summarizer = pipeline(
+                    "summarization",
+                    model="csebuetnlp/mT5_multilingual_XLSum",
+                    device_map="auto",
+                    load_in_8bit=True,
+                    model_kwargs={"torch_dtype": torch.float16}
+                )
+            except:
+                st.session_state.summarizer = None
+    return st.session_state.summarizer
 
-# ✅ NEW: Extractive summarization (NO MODEL)
 def generate_summary(text, max_length=200, min_length=50):
-    """Extractive summary - picks key sentences"""
-    sentences = split_into_sentences(text)
+    summarizer = load_summarization_model()
+    if summarizer is None:
+        return "Summarization model not available."
+    try:
+        max_input = 1024
+        if len(text) > max_input:
+            text = text[:max_input]
+        summary = summarizer(
+            text,
+            max_length=max_length,
+            min_length=min_length,
+            do_sample=False
+        )
+        return summary[0]['summary_text']
+    except Exception as e:
+        return f"Error: {str(e)}"
+    finally:
+        if 'summarizer' in st.session_state:
+            del st.session_state.summarizer
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-    if not sentences:
-        return "No content to summarize."
-
-    # Score sentences based on length and position
-    scored = []
-    for i, sent in enumerate(sentences):
-        position_weight = 1.0 if i < 3 else 0.5
-        length_score = min(len(sent.split()) / 15.0, 1.0)
-        score = length_score * position_weight
-        scored.append((score, sent))
-
-    scored.sort(reverse=True)
-
-    # Select sentences based on desired length
-    if max_length < 150:
-        num_sentences = 3
-    elif max_length < 250:
-        num_sentences = 5
-    else:
-        num_sentences = 7
-
-    summary_sentences = [s[1] for s in scored[:num_sentences]]
-    return " ".join(summary_sentences)
-
-# ==================== PDF READER WITH CHUNKED AUDIO ====================
+# ==================== PDF READER (FIXED) ====================
 def pdf_reader_tab():
-    """Interactive PDF reader with chunked audio for long texts"""
+    """Interactive PDF reader with corrected highlighting"""
     st.subheader("📖 PDF Reader with Text-to-Speech")
 
     if 'page_images' not in st.session_state or not st.session_state.page_images:
@@ -391,6 +336,7 @@ def pdf_reader_tab():
     with col1:
         base_image = st.session_state.page_images[page_idx]
 
+        # Get current sentence's bounding box from matched boxes
         current_box = None
         if ('matched_sentence_boxes' in st.session_state and 
             st.session_state.matched_sentence_boxes and
@@ -401,14 +347,15 @@ def pdf_reader_tab():
             if box_data['box'] and box_data['page'] == page_idx:
                 current_box = box_data['box']
 
+        # Draw highlight
         if current_box:
             highlighted_image = draw_highlight_on_image(base_image, current_box)
-            st.image(highlighted_image,
-                    caption=f"Page {page_num} 🟡 Highlighted",
+            st.image(highlighted_image, 
+                    caption=f"Page {page_num} 🟡 Highlighted", 
                     width="stretch")
         else:
-            st.image(base_image,
-                    caption=f"Page {page_num}",
+            st.image(base_image, 
+                    caption=f"Page {page_num}", 
                     width="stretch")
 
     with col2:
@@ -418,6 +365,7 @@ def pdf_reader_tab():
             all_text = st.session_state.processed_text
             sentences = split_into_sentences(all_text)
 
+            # Create matched boxes if not exists
             if ('matched_sentence_boxes' not in st.session_state and 
                 'paragraph_boxes' in st.session_state):
                 st.session_state.matched_sentence_boxes = match_sentences_to_boxes(
@@ -451,7 +399,7 @@ def pdf_reader_tab():
 
                     with col_b:
                         if st.button("🔊 Read Aloud"):
-                            audio_data = generate_audio(current_sentence, max_length=1500)
+                            audio_data = generate_audio(current_sentence, max_length=500)
                             if audio_data:
                                 st.audio(audio_data, format='audio/wav', autoplay=True)
 
@@ -460,28 +408,26 @@ def pdf_reader_tab():
                             st.session_state.current_sentence_idx += 1
                             st.rerun()
 
-                # ✅ AUTO-PLAY WITH CHUNKING
+                # Auto-play mode
                 else:
-                    st.markdown("**🎵 Continuous Audio (Chunked)**")
-                    st.caption("💡 Automatically splits long text into chunks and combines audio")
+                    st.markdown("**🎵 Continuous Audio**")
 
                     col_a, col_b = st.columns(2)
 
                     with col_a:
-                        if st.button("📄 Play Entire Book", type="primary", width="stretch"):
-                            remaining_text = " ".join(sentences[st.session_state.current_sentence_idx:])
+                        if st.button("📄 Play All", type="primary", width="stretch"):
+                            remaining = sentences[st.session_state.current_sentence_idx:]
+                            combined = " ".join(remaining)
 
-                            with st.spinner("Generating complete audiobook..."):
-                                # Use chunked audio generation
-                                audio_data = generate_audio_chunked(remaining_text, chunk_size=1500)
+                            max_chars = 2000
+                            if len(combined) > max_chars:
+                                combined = combined[:max_chars]
 
-                                if audio_data:
-                                    st.success("✅ Audiobook ready! Playing...")
-                                    st.audio(audio_data, format='audio/wav', autoplay=True)
-                                    st.session_state.current_sentence_idx = len(sentences) - 1
-                                    st.balloons()
-                                else:
-                                    st.error("Failed to generate audio")
+                            audio_data = generate_audio(combined, max_length=max_chars)
+                            if audio_data:
+                                st.audio(audio_data, format='audio/wav', autoplay=True)
+                                st.session_state.current_sentence_idx = len(sentences) - 1
+                                st.balloons()
 
                     with col_b:
                         if st.button("🔄 Restart", width="stretch"):
@@ -510,29 +456,38 @@ def main():
     st.markdown("""
     **AI-Powered Document Processing & Interactive Reading Platform**
 
-    Transform your Bengali PDFs into an interactive audiobook experience.
+    Transform your Bengali PDFs into an interactive reading experience with advanced AI capabilities.
     """)
 
+    # ✅ EXPLICIT SERVICE DESCRIPTIONS
     with st.expander("📋 What This App Does", expanded=False):
         col1, col2 = st.columns(2)
 
         with col1:
             st.markdown("""
             **🔍 Core Services:**
-            - **OCR Text Extraction**: Google Vision API for Bengali PDFs
-            - **Visual PDF Reader**: Sentence-by-sentence highlighting
-            - **Text-to-Speech**: Chunked audio for entire books
-            - **Smart Q&A**: RAG-based question answering
+            - **OCR Text Extraction**: Convert PDF images to editable text using Google Vision API
+            - **Visual PDF Reader**: Read PDFs with sentence-by-sentence highlighting
+            - **Text-to-Speech**: Listen to Bengali text with natural voice synthesis
+            - **Smart Q&A**: Ask questions and get AI-powered answers from your documents
             """)
 
         with col2:
             st.markdown("""
             **✨ Advanced Features:**
-            - **Chunked Audio**: Handles books of any length
-            - **Manual Mode**: Navigate line-by-line
-            - **Extractive Summarization**: No heavy models needed
-            - **Memory Optimized**: Works on free Streamlit tier
+            - **Auto-Play Mode**: Continuous audio playback for hands-free listening
+            - **Manual Mode**: Navigate line-by-line with full control
+            - **Document Summarization**: AI-generated summaries using mT5 model
+            - **Hybrid Search**: Semantic + keyword-based document retrieval
             """)
+
+        st.markdown("""
+        **🎯 Perfect For:**
+        - 📚 Students reading Bengali textbooks
+        - 📄 Researchers analyzing Bengali documents
+        - 👂 Audio book enthusiasts
+        - 🎓 Language learners
+        """)
 
     # Session state
     if 'processed_text' not in st.session_state:
@@ -551,10 +506,11 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("📄 Upload PDF")
+        st.caption("Supports Bengali & English text")
         pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
 
         if pdf_file and st.button("🔬 Process PDF", type="primary"):
-            with st.spinner("Processing..."):
+            with st.spinner("Processing with Google Vision API..."):
                 temp_path = f"temp_{int(time.time())}.pdf"
                 with open(temp_path, 'wb') as f:
                     f.write(pdf_file.read())
@@ -570,21 +526,70 @@ def main():
                     st.session_state.rag_setup = setup_rag_pipeline(st.session_state.chunks)
                     st.session_state.current_sentence_idx = 0
 
+                    # Clear old matched boxes
                     if 'matched_sentence_boxes' in st.session_state:
                         del st.session_state.matched_sentence_boxes
 
                     st.success(f"✅ Extracted {len(text)} characters")
+                    st.caption(f"🟡 Found {len(paragraph_boxes)} paragraphs")
                 else:
                     st.error("Failed to extract text")
 
         st.header("💾 Memory Status")
-        st.success("✅ Optimized for 1GB RAM")
-        st.caption("• Summarizer: Disabled (-500MB)")
-        st.caption("• Chunked TTS: Active")
+        st.info("✅ Using 8-bit quantized models")
+        st.caption("~75% memory reduction")
+
+        st.header("🛠️ Technologies")
+        st.caption("""
+        • Google Vision API
+        • BanglaBERT
+        • mT5 (Quantized)
+        • FAISS + BM25
+        • MMS-TTS
+        """)
 
     # Main content
     if st.session_state.processed_text is None:
         st.info("👈 Upload a PDF to get started")
+
+        # Service cards
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.markdown("""
+            ### 📖 PDF Reader
+            Interactive reading with:
+            - Visual highlighting
+            - Line-by-line navigation
+            - Audio playback
+            """)
+
+        with col2:
+            st.markdown("""
+            ### 💬 Smart Q&A
+            Ask questions about your document:
+            - Semantic search
+            - Context-aware answers
+            - Confidence scores
+            """)
+
+        with col3:
+            st.markdown("""
+            ### 📝 Summarization
+            AI-powered summaries:
+            - Short/Medium/Long
+            - Memory-efficient
+            - Audio support
+            """)
+
+        with col4:
+            st.markdown("""
+            ### 🔊 Text-to-Speech
+            Natural voice synthesis:
+            - Bengali language
+            - Continuous playback
+            - Manual control
+            """)
     else:
         tabs = st.tabs(["📖 PDF Reader", "💬 Q&A", "📝 Summary", "📄 Full Text"])
 
@@ -593,6 +598,7 @@ def main():
 
         with tabs[1]:
             st.subheader("💬 Smart Question Answering")
+            st.caption("Uses Hybrid RAG (Dense + Sparse retrieval) with BanglaBERT")
             question = st.text_input("Your question:")
 
             if st.button("💡 Get Answer", type="primary"):
@@ -611,27 +617,35 @@ def main():
                         st.success(f"**Answer:** {result['answer']}")
                         st.info(f"**Confidence:** {result['score']:.2%}")
 
-                        with st.expander("📚 Context"):
+                        with st.expander("📚 Retrieved Context"):
                             st.text(context)
+                else:
+                    st.warning("Please enter a question")
 
         with tabs[2]:
-            st.subheader("📝 Extractive Summarization")
-            st.caption("⚡ No heavy models - instant results!")
+            st.subheader("📝 Document Summarization")
+            st.caption("Using quantized mT5 model (75% less memory)")
 
             summary_length = st.radio("Length", ["Short", "Medium", "Long"], index=1, horizontal=True)
 
             if st.button("📄 Generate Summary", type="primary"):
-                length_map = {"Short": (30, 100), "Medium": (50, 200), "Long": (100, 300)}
-                min_len, max_len = length_map[summary_length]
+                with st.spinner("Generating summary..."):
+                    length_map = {"Short": (30, 100), "Medium": (50, 200), "Long": (100, 300)}
+                    min_len, max_len = length_map[summary_length]
 
-                summary = generate_summary(
-                    st.session_state.processed_text,
-                    max_length=max_len,
-                    min_length=min_len
-                )
+                    summary = generate_summary(
+                        st.session_state.processed_text[:2000],
+                        max_length=max_len,
+                        min_length=min_len
+                    )
 
-                st.write("**Summary:**")
-                st.write(summary)
+                    st.write("**Summary:**")
+                    st.write(summary)
+
+                    if st.button("🔊 Listen to Summary"):
+                        audio_data = generate_audio(summary)
+                        if audio_data:
+                            st.audio(audio_data, format='audio/wav')
 
         with tabs[3]:
             st.subheader("📄 Full Extracted Text")
