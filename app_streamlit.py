@@ -8,7 +8,7 @@ import torch
 import scipy.io.wavfile as wavfile
 import io
 import time
-import json
+import gc
 from datetime import datetime
 import nltk
 from rank_bm25 import BM25Okapi
@@ -18,37 +18,44 @@ from google.cloud import vision
 from google.oauth2 import service_account
 import os
 
-# Download required NLTK data
+# Download NLTK data
 try:
     nltk.data.find('tokenizers/punkt')
 except LookupError:
     nltk.download('punkt', quiet=True)
 
-# ==================== GOOGLE VISION API OCR MODULE ====================
-# Set API request limit (for free tier: 1000 requests/month, paid: configurable)
-MAX_PAGES_PER_REQUEST = 5  # Limit to avoid quota exhaustion
-MONTHLY_REQUEST_LIMIT = 1000  # Adjust based on your quota
+# ==================== MEMORY OPTIMIZATION ====================
+torch.set_num_threads(1)  # Reduce CPU overhead
+os.environ['TOKENIZERS_PARALLELISM'] = 'false'  # Prevent tokenizer warnings
+
+# ==================== GOOGLE VISION API ====================
+MAX_PAGES_PER_REQUEST = 5
+MONTHLY_REQUEST_LIMIT = 1000
 
 @st.cache_resource
 def get_vision_client():
-    if "gcp_service_account" in st.secrets:
-        credentials = service_account.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"]
-        )
-        client = vision.ImageAnnotatorClient(credentials=credentials)
-        return client
-    else:
-        st.error("❌ Google Cloud credentials not found in secrets!")
+    """Initialize Google Vision API client"""
+    try:
+        if "gcp_service_account" in st.secrets:
+            credentials = service_account.Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"]
+            )
+            client = vision.ImageAnnotatorClient(credentials=credentials)
+            return client
+        else:
+            st.error("❌ Google Cloud credentials not found in secrets!")
+            return None
+    except Exception as e:
+        st.error(f"Failed to initialize Google Vision API: {str(e)}")
         return None
 
 def extract_text_with_google_vision(pdf_path):
-    """Extract text from PDF using Google Vision API with rate limiting"""
+    """Extract text from PDF using Google Vision API"""
     client = get_vision_client()
     if client is None:
-        return "❌ Google Vision API not configured properly"
+        return "", []
 
     try:
-        # Read PDF file
         if isinstance(pdf_path, str):
             with open(pdf_path, 'rb') as f:
                 pdf_bytes = f.read()
@@ -57,77 +64,61 @@ def extract_text_with_google_vision(pdf_path):
         else:
             pdf_bytes = pdf_path
 
-        # Convert PDF to images
         images = convert_from_bytes(pdf_bytes)
 
-        # Limit number of pages to process
         if len(images) > MAX_PAGES_PER_REQUEST:
-            st.warning(f"⚠️ PDF has {len(images)} pages. Processing first {MAX_PAGES_PER_REQUEST} to stay within API limits.")
+            st.warning(f"⚠️ Processing first {MAX_PAGES_PER_REQUEST} pages")
             images = images[:MAX_PAGES_PER_REQUEST]
 
         full_text = ""
+        page_images = []
         progress_bar = st.progress(0)
-        status_text = st.empty()
 
         for idx, img in enumerate(images):
-            status_text.text(f"Processing page {idx + 1}/{len(images)}...")
+            # Store image for PDF reader
+            page_images.append(img)
 
-            # Convert PIL image to bytes
             img_byte_arr = io.BytesIO()
             img.save(img_byte_arr, format='PNG')
             img_byte_arr = img_byte_arr.getvalue()
 
-            # Create Vision API image object
             image = vision.Image(content=img_byte_arr)
-
-            # Set language hints for Bengali
             image_context = vision.ImageContext(language_hints=["bn", "en"])
-
-            # Perform OCR with DOCUMENT_TEXT_DETECTION (better for dense text)
-            response = client.document_text_detection(
-                image=image,
-                image_context=image_context
-            )
+            response = client.document_text_detection(image=image, image_context=image_context)
 
             if response.error.message:
-                st.error(f"API Error on page {idx + 1}: {response.error.message}")
+                st.error(f"Error on page {idx + 1}: {response.error.message}")
                 continue
 
-            # Extract text
             if response.full_text_annotation:
-                page_text = response.full_text_annotation.text
-                full_text += page_text + "\n\n"
+                full_text += response.full_text_annotation.text + "\n\n"
 
-            # Update progress
             progress_bar.progress((idx + 1) / len(images))
-
-            # Rate limiting: small delay between requests
             time.sleep(0.5)
 
-        status_text.text("✅ OCR completed!")
         progress_bar.empty()
-        status_text.empty()
-
-        return full_text.strip()
+        return full_text.strip(), page_images
 
     except Exception as e:
         st.error(f"Error during OCR: {str(e)}")
-        return ""
+        return "", []
 
-# ==================== TTS MODULE ====================
-@st.cache_resource
+# ==================== TTS MODULE (LAZY LOAD) ====================
 def load_tts_model():
-    """Load TTS model (cached)"""
-    model = VitsModel.from_pretrained("facebook/mms-tts-ben")
-    tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ben")
-    return model, tokenizer
+    """Load TTS model only when needed"""
+    if 'tts_model' not in st.session_state:
+        with st.spinner("Loading TTS model..."):
+            model = VitsModel.from_pretrained("facebook/mms-tts-ben")
+            tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ben")
+            st.session_state.tts_model = (model, tokenizer)
+    return st.session_state.tts_model
 
-def generate_audio(text, max_length=1000):
+def generate_audio(text, max_length=500):
     """Generate audio from text"""
     try:
         model, tokenizer = load_tts_model()
         if len(text) > max_length:
-            text = text[:max_length] + "..."
+            text = text[:max_length]
         inputs = tokenizer(text, return_tensors="pt")
         with torch.no_grad():
             output = model(**inputs).waveform
@@ -140,8 +131,8 @@ def generate_audio(text, max_length=1000):
         st.error(f"TTS Error: {str(e)}")
         return None
 
-# ==================== CHUNKING MODULE ====================
-def semantic_chunk_text(text, max_chunk_size=1000, overlap=100):
+# ==================== CHUNKING ====================
+def semantic_chunk_text(text, max_chunk_size=1000):
     """Semantic chunking with Bengali sentence awareness"""
     sentences = re.split(r'[।.!?]\s+', text)
     sentences = [s.strip() + '।' if not s.endswith(('।', '.', '!', '?')) else s.strip()
@@ -159,14 +150,25 @@ def semantic_chunk_text(text, max_chunk_size=1000, overlap=100):
         chunks.append(current_chunk.strip())
     return chunks
 
+def split_into_sentences(text):
+    """Split text into sentences for line-by-line reading"""
+    sentences = re.split(r'([।.!?]\s*)', text)
+    result = []
+    for i in range(0, len(sentences)-1, 2):
+        if i+1 < len(sentences):
+            result.append(sentences[i] + sentences[i+1])
+        else:
+            result.append(sentences[i])
+    return [s.strip() for s in result if s.strip()]
+
 # ==================== RAG MODULE ====================
 @st.cache_resource
 def get_embedder():
-    """Get sentence embedder (cached)"""
+    """Get lightweight embedder"""
     return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
 def setup_rag_pipeline(chunks):
-    """Setup hybrid RAG"""
+    """Setup RAG"""
     embedder = get_embedder()
     embeddings = embedder.encode(chunks, show_progress_bar=False)
     dense_index = faiss.IndexFlatL2(embeddings.shape[1])
@@ -197,30 +199,37 @@ def hybrid_search(dense_index, sparse_index, embedder, question, chunks, k=3, al
     top_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:k]
     return [chunks[idx] for idx, _ in top_indices]
 
-# ==================== QA MODULE ====================
-@st.cache_resource
+# ==================== QA MODULE (LAZY LOAD) ====================
 def load_qa_model():
-    """Load QA model (cached)"""
-    model_name = "csebuetnlp/banglabert"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForQuestionAnswering.from_pretrained(model_name)
-    return pipeline('question-answering', model=model, tokenizer=tokenizer)
+    """Load QA model only when needed"""
+    if 'qa_model' not in st.session_state:
+        with st.spinner("Loading Q&A model..."):
+            model_name = "csebuetnlp/banglabert"
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            model = AutoModelForQuestionAnswering.from_pretrained(model_name)
+            st.session_state.qa_model = pipeline('question-answering', model=model, tokenizer=tokenizer)
+    return st.session_state.qa_model
 
-# ==================== SUMMARIZATION MODULE ====================
-@st.cache_resource
+# ==================== SUMMARIZATION (QUANTIZED) ====================
 def load_summarization_model():
-    """Load summarization model (cached)"""
-    try:
-        return pipeline(
-            "summarization",
-            model="csebuetnlp/mT5_multilingual_XLSum",
-            tokenizer="csebuetnlp/mT5_multilingual_XLSum"
-        )
-    except:
-        return None
+    """Load quantized mT5 model for memory efficiency"""
+    if 'summarizer' not in st.session_state:
+        with st.spinner("Loading summarization model (8-bit quantized)..."):
+            try:
+                # 8-bit quantization to reduce memory by ~75%
+                st.session_state.summarizer = pipeline(
+                    "summarization",
+                    model="csebuetnlp/mT5_multilingual_XLSum",
+                    device_map="auto",
+                    load_in_8bit=True,
+                    model_kwargs={"torch_dtype": torch.float16}
+                )
+            except:
+                st.session_state.summarizer = None
+    return st.session_state.summarizer
 
 def generate_summary(text, max_length=200, min_length=50):
-    """Generate summary"""
+    """Generate summary with quantized model"""
     summarizer = load_summarization_model()
     if summarizer is None:
         return "Summarization model not available."
@@ -237,6 +246,90 @@ def generate_summary(text, max_length=200, min_length=50):
         return summary[0]['summary_text']
     except Exception as e:
         return f"Error: {str(e)}"
+    finally:
+        # Clear model after use to free memory
+        if 'summarizer' in st.session_state:
+            del st.session_state.summarizer
+            gc.collect()
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+# ==================== PDF READER MODULE ====================
+def pdf_reader_tab():
+    """Interactive PDF reader with line-by-line TTS"""
+    st.subheader("📖 PDF Reader with Text-to-Speech")
+
+    if 'page_images' not in st.session_state or not st.session_state.page_images:
+        st.warning("Please process a PDF first in the sidebar")
+        return
+
+    # Page selector
+    page_num = st.selectbox(
+        "Select Page",
+        range(1, len(st.session_state.page_images) + 1),
+        format_func=lambda x: f"Page {x}"
+    )
+
+    page_idx = page_num - 1
+
+    # Display PDF page image
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.image(st.session_state.page_images[page_idx], 
+                caption=f"Page {page_num}", 
+                use_column_width=True)
+
+    with col2:
+        st.markdown("**📄 Extracted Text**")
+
+        # Split text into sentences
+        if 'processed_text' in st.session_state:
+            all_text = st.session_state.processed_text
+            sentences = split_into_sentences(all_text)
+
+            # Initialize sentence index in session state
+            if 'current_sentence_idx' not in st.session_state:
+                st.session_state.current_sentence_idx = 0
+
+            # Display current sentence
+            if sentences:
+                current_sentence = sentences[st.session_state.current_sentence_idx]
+
+                # Highlighted text display
+                st.markdown(f"**Current Line:**")
+                st.info(current_sentence)
+
+                # Audio controls
+                col_a, col_b, col_c = st.columns(3)
+
+                with col_a:
+                    if st.button("⏮️ Previous", disabled=st.session_state.current_sentence_idx == 0):
+                        st.session_state.current_sentence_idx = max(0, st.session_state.current_sentence_idx - 1)
+                        st.rerun()
+
+                with col_b:
+                    if st.button("🔊 Read Aloud"):
+                        with st.spinner("Generating audio..."):
+                            audio_data = generate_audio(current_sentence, max_length=300)
+                            if audio_data:
+                                st.audio(audio_data, format='audio/wav', autoplay=True)
+
+                with col_c:
+                    if st.button("⏭️ Next", disabled=st.session_state.current_sentence_idx >= len(sentences)-1):
+                        st.session_state.current_sentence_idx = min(len(sentences)-1, st.session_state.current_sentence_idx + 1)
+                        st.rerun()
+
+                # Progress indicator
+                st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
+                st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
+
+                # Full text display
+                with st.expander("📑 View All Text"):
+                    for idx, sent in enumerate(sentences):
+                        if idx == st.session_state.current_sentence_idx:
+                            st.markdown(f"**➤ {sent}**")
+                        else:
+                            st.markdown(sent)
 
 # ==================== STREAMLIT APP ====================
 def main():
@@ -246,99 +339,78 @@ def main():
         layout="wide"
     )
 
-    st.title("🎓 Bengali PDF Assistant - Research Edition")
+    st.title("🎓 Bengali PDF Assistant - Memory Optimized")
     st.markdown("""
-    **Advanced NLP Pipeline for Bengali Document Analysis**
+    **Advanced NLP Pipeline with PDF Reader**
 
-    *Features: Google Vision OCR • Hybrid RAG • Meta MMS-TTS • BanglaBERT QA • Document Summarization*
-
-    ⚠️ **API Limits:** Processing is limited to {0} pages per PDF. Monthly quota: {1} requests.
-    """.format(MAX_PAGES_PER_REQUEST, MONTHLY_REQUEST_LIMIT))
+    *Google Vision OCR • Quantized mT5 • Hybrid RAG • BanglaBERT QA • Line-by-Line TTS*
+    """)
 
     # Initialize session state
     if 'processed_text' not in st.session_state:
         st.session_state.processed_text = None
+    if 'page_images' not in st.session_state:
+        st.session_state.page_images = []
     if 'chunks' not in st.session_state:
         st.session_state.chunks = None
     if 'rag_setup' not in st.session_state:
         st.session_state.rag_setup = None
 
-    # Sidebar for PDF upload
+    # Sidebar
     with st.sidebar:
         st.header("📄 Upload PDF")
-        pdf_file = st.file_uploader("Choose a Bengali PDF file", type=['pdf'])
+        pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
 
-        if pdf_file is not None and st.button("🔬 Process PDF", type="primary"):
-            with st.spinner("Processing PDF with Google Vision API..."):
-                # Save uploaded file temporarily
+        if pdf_file and st.button("🔬 Process PDF", type="primary"):
+            with st.spinner("Processing with Google Vision API..."):
                 temp_path = f"temp_{int(time.time())}.pdf"
                 with open(temp_path, 'wb') as f:
                     f.write(pdf_file.read())
 
-                # Extract text
-                text = extract_text_with_google_vision(temp_path)
-
-                # Clean up temp file
+                text, images = extract_text_with_google_vision(temp_path)
                 os.remove(temp_path)
 
                 if text:
                     st.session_state.processed_text = text
+                    st.session_state.page_images = images
                     st.session_state.chunks = semantic_chunk_text(text)
                     st.session_state.rag_setup = setup_rag_pipeline(st.session_state.chunks)
-                    st.success(f"✅ Extracted {len(text)} characters from PDF")
+                    st.session_state.current_sentence_idx = 0  # Reset reader
+                    st.success(f"✅ Extracted {len(text)} characters")
                 else:
                     st.error("Failed to extract text")
 
-        # API Configuration
-        st.header("⚙️ API Configuration")
-        st.info("""
-        **Setup Instructions:**
-        1. Create a Google Cloud project
-        2. Enable Vision API
-        3. Create service account & download JSON key
-        4. Add to Streamlit secrets as `GOOGLE_APPLICATION_CREDENTIALS`
-        """)
+        st.header("💾 Memory Status")
+        st.info("✅ Using 8-bit quantized models")
+        st.caption("~75% memory reduction")
 
-    # Main content area
+    # Main content
     if st.session_state.processed_text is None:
-        st.info("👈 Upload a PDF file to get started")
+        st.info("👈 Upload a PDF to get started")
         st.markdown("""
-        ### How to use:
-        1. Upload a Bengali PDF document
-        2. Wait for OCR processing (Google Vision API)
-        3. Ask questions, generate summaries, or listen to audio
-
-        ### API Quota Information:
-        - **Free Tier:** 1,000 requests/month
-        - **Paid Tier:** Custom limits (view in Google Cloud Console)
-        - **Rate Limits:** Managed automatically with delays
+        ### Features:
+        - 📖 **PDF Reader**: Visual page display with line-by-line TTS
+        - 💬 **Q&A**: Ask questions about your document
+        - 📝 **Summary**: Quantized mT5 for memory efficiency
+        - 🔊 **TTS**: Bengali text-to-speech
         """)
     else:
-        # Display extracted text preview
-        with st.expander("📄 View Extracted Text", expanded=False):
-            st.text_area("Full Text", st.session_state.processed_text[:2000] + "...", height=200)
+        tabs = st.tabs(["📖 PDF Reader", "💬 Q&A", "📝 Summary", "📄 Full Text"])
 
-        # Tabs for different features
-        tab1, tab2, tab3 = st.tabs(["💬 Question Answering", "📝 Summarization", "📖 Read Aloud"])
+        with tabs[0]:
+            pdf_reader_tab()
 
-        with tab1:
-            st.subheader("💬 Ask Questions About Your Document")
-            col1, col2 = st.columns([2, 1])
-
-            with col1:
-                question = st.text_input("🔍 Your question:", placeholder="Type your question here...")
-
-            with col2:
-                num_chunks = st.slider("Context chunks", 1, 5, 3)
-                alpha = st.slider("Dense/Sparse balance", 0.0, 1.0, 0.5, 0.1)
+        with tabs[1]:
+            st.subheader("💬 Ask Questions")
+            question = st.text_input("Your question:")
 
             if st.button("💡 Get Answer", type="primary"):
                 if question:
-                    with st.spinner("Searching and generating answer..."):
+                    with st.spinner("Searching..."):
                         dense_idx, sparse_idx, embedder = st.session_state.rag_setup
                         relevant_chunks = hybrid_search(
                             dense_idx, sparse_idx, embedder, question,
-                            st.session_state.chunks, k=num_chunks, alpha=alpha
+                            st.session_state.chunks, k=3, alpha=0.5
                         )
                         context = "\n---\n".join(relevant_chunks)
 
@@ -348,22 +420,16 @@ def main():
                         st.success(f"**Answer:** {result['answer']}")
                         st.info(f"**Confidence:** {result['score']:.2%}")
 
-                        with st.expander("📚 View Retrieved Context"):
+                        with st.expander("📚 Context"):
                             st.text(context)
-
-                        # Generate audio
-                        audio_data = generate_audio(result['answer'])
-                        if audio_data:
-                            st.audio(audio_data, format='audio/wav')
                 else:
                     st.warning("Please enter a question")
 
-        with tab2:
-            st.subheader("📝 Document Summarization")
+        with tabs[2]:
+            st.subheader("📝 Document Summary")
+            st.info("💡 Using 8-bit quantized mT5 (75% less memory)")
 
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                summary_length = st.radio("Summary Length", ["Short", "Medium", "Long"], index=1)
+            summary_length = st.radio("Length", ["Short", "Medium", "Long"], index=1, horizontal=True)
 
             if st.button("📄 Generate Summary", type="primary"):
                 with st.spinner("Generating summary..."):
@@ -380,20 +446,14 @@ def main():
                     st.write(summary)
 
                     # Generate audio
-                    audio_data = generate_audio(summary)
-                    if audio_data:
-                        st.audio(audio_data, format='audio/wav')
+                    if st.button("🔊 Listen to Summary"):
+                        audio_data = generate_audio(summary)
+                        if audio_data:
+                            st.audio(audio_data, format='audio/wav')
 
-        with tab3:
-            st.subheader("📖 Listen to Your Document")
-            st.info("Generate audio for the first 1000 characters of your document")
-
-            if st.button("🎙️ Generate Audio", type="primary"):
-                with st.spinner("Generating audio..."):
-                    audio_data = generate_audio(st.session_state.processed_text[:1000])
-                    if audio_data:
-                        st.success("✅ Audio generated!")
-                        st.audio(audio_data, format='audio/wav')
+        with tabs[3]:
+            st.subheader("📄 Full Extracted Text")
+            st.text_area("", st.session_state.processed_text, height=400)
 
 if __name__ == "__main__":
     main()

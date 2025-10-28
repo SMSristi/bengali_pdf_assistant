@@ -11,3 +11,6 @@ scipy>=1.11.0
 nltk>=3.8.1
 rank-bm25>=0.2.2
 Pillow>=10.0.0
+bitsandbytes>=0.41.0
+accelerate>=0.20.0
+
