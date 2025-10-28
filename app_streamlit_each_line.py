@@ -112,8 +112,8 @@ def load_tts_model():
             st.session_state.tts_model = (model, tokenizer)
     return st.session_state.tts_model
 
-def generate_audio(text, max_length=2000):
-    """Generate audio from text (supports longer text)"""
+def generate_audio(text, max_length=500):
+    """Generate audio from text"""
     try:
         model, tokenizer = load_tts_model()
         if len(text) > max_length:
@@ -244,9 +244,9 @@ def generate_summary(text, max_length=200, min_length=50):
             gc.collect()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-# ==================== PDF READER (SINGLE AUDIO) ====================
+# ==================== PDF READER WITH AUTO-PLAY ====================
 def pdf_reader_tab():
-    """Interactive PDF reader with Manual & Single-Audio Auto-Play"""
+    """Interactive PDF reader with Manual & Auto-Play modes"""
     st.subheader("📖 PDF Reader with Text-to-Speech")
 
     if 'page_images' not in st.session_state or not st.session_state.page_images:
@@ -285,7 +285,7 @@ def pdf_reader_tab():
             # Mode selection  
             reading_mode = st.radio(
                 "Reading Mode:",
-                ["🎯 Manual (Line by line)", "▶️ Auto-Play (Continuous audio)"],
+                ["🎯 Manual (Click Next for each line)", "▶️ Auto-Play (Continuous reading)"],
                 horizontal=False
             )
 
@@ -297,7 +297,7 @@ def pdf_reader_tab():
                 st.info(current_sentence)
 
                 # ===== MANUAL MODE =====
-                if reading_mode == "🎯 Manual (Line by line)":
+                if reading_mode == "🎯 Manual (Click Next for each line)":
                     col_a, col_b, col_c = st.columns(3)
 
                     with col_a:
@@ -308,7 +308,7 @@ def pdf_reader_tab():
                     with col_b:
                         if st.button("🔊 Read Aloud"):
                             with st.spinner("Generating audio..."):
-                                audio_data = generate_audio(current_sentence, max_length=500)
+                                audio_data = generate_audio(current_sentence, max_length=300)
                                 if audio_data:
                                     st.audio(audio_data, format='audio/wav', autoplay=True)
 
@@ -317,57 +317,56 @@ def pdf_reader_tab():
                             st.session_state.current_sentence_idx = min(len(sentences)-1, st.session_state.current_sentence_idx + 1)
                             st.rerun()
 
-                # ===== AUTO-PLAY MODE (SINGLE AUDIO) =====
+                # ===== AUTO-PLAY MODE =====
                 else:
-                    st.markdown("**🎵 Continuous Audio Playback**")
-                    st.info("💡 Generates ONE audio file for seamless listening")
+                    st.markdown("**🎵 Continuous Reading Controls**")
 
-                    col_a, col_b = st.columns(2)
+                    col_a, col_b, col_c = st.columns(3)
 
                     with col_a:
-                        if st.button("📄 Play Entire Page/Book", type="primary", use_container_width=True):
-                            with st.spinner("Generating continuous audio..."):
-                                # Combine all remaining sentences
-                                remaining_sentences = sentences[st.session_state.current_sentence_idx:]
-                                combined_text = " ".join(remaining_sentences)
+                        if st.button("📄 Read Entire Book", type="primary"):
+                            start_idx = st.session_state.current_sentence_idx
+                            total_sentences = len(sentences)
 
-                                # Show info about text length
-                                st.caption(f"Generating audio for {len(combined_text)} characters...")
+                            # Create progress display
+                            progress_bar = st.progress(0)
+                            status_text = st.empty()
 
-                                # Limit to prevent memory issues
-                                max_chars = 2000
-                                if len(combined_text) > max_chars:
-                                    st.warning(f"⚠️ Text is long. Using first {max_chars} characters.")
-                                    combined_text = combined_text[:max_chars]
+                            # Read all sentences from current position
+                            for idx in range(start_idx, total_sentences):
+                                st.session_state.current_sentence_idx = idx
+                                current_sent = sentences[idx]
 
-                                # Generate ONE audio file
-                                audio_data = generate_audio(combined_text, max_length=max_chars)
+                                # Update progress
+                                progress = (idx - start_idx + 1) / (total_sentences - start_idx)
+                                progress_bar.progress(progress)
+                                status_text.text(f"Reading sentence {idx + 1}/{total_sentences}...")
 
+                                # Generate and play audio
+                                audio_data = generate_audio(current_sent, max_length=300)
                                 if audio_data:
-                                    st.success("✅ Audio generated! Playing...")
                                     st.audio(audio_data, format='audio/wav', autoplay=True)
+                                    time.sleep(3)  # Wait for audio to play
 
-                                    # Move to last sentence
-                                    st.session_state.current_sentence_idx = len(sentences) - 1
-
-                                    st.balloons()
-                                    st.info("🎉 Playback complete!")
+                            progress_bar.empty()
+                            status_text.empty()
+                            st.success("✅ Finished reading entire book!")
+                            st.balloons()
 
                     with col_b:
-                        if st.button("🔄 Restart", use_container_width=True):
+                        if st.button("🔄 Restart from Beginning"):
                             st.session_state.current_sentence_idx = 0
-                            st.success("↩️ Reset to beginning")
+                            st.success("Reset to sentence 1")
                             st.rerun()
 
-                    # Additional option
-                    st.markdown("---")
-                    st.markdown("**Or play current line only:**")
-                    if st.button("🔊 Play Current Sentence"):
-                        audio_data = generate_audio(current_sentence, max_length=500)
-                        if audio_data:
-                            st.audio(audio_data, format='audio/wav', autoplay=True)
+                    with col_c:
+                        # Manual navigation in auto-play mode
+                        if st.button("⏭️ Skip to Next"):
+                            if st.session_state.current_sentence_idx < len(sentences) - 1:
+                                st.session_state.current_sentence_idx += 1
+                                st.rerun()
 
-                # Progress indicator
+                # Progress indicator (for both modes)
                 st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
                 st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
 
@@ -389,9 +388,9 @@ def main():
 
     st.title("🎓 Bengali PDF Assistant - Memory Optimized")
     st.markdown("""
-    **Advanced NLP Pipeline with Continuous Audio Playback**
+    **Advanced NLP Pipeline with Dual-Mode PDF Reader**
 
-    *Google Vision OCR • Quantized mT5 • Hybrid RAG • BanglaBERT QA • Continuous TTS*
+    *Google Vision OCR • Quantized mT5 • Hybrid RAG • BanglaBERT QA • Manual & Auto-Play TTS*
     """)
 
     # Session state
@@ -437,10 +436,10 @@ def main():
         st.info("👈 Upload a PDF to get started")
         st.markdown("""
         ### Features:
-        - 📖 **PDF Reader**: Manual & Continuous Audio modes
+        - 📖 **PDF Reader**: Manual & Auto-Play modes
         - 💬 **Q&A**: Ask questions about your document
         - 📝 **Summary**: Quantized mT5 for memory efficiency
-        - 🔊 **TTS**: Bengali continuous audio playback
+        - 🔊 **TTS**: Bengali text-to-speech
         """)
     else:
         tabs = st.tabs(["📖 PDF Reader", "💬 Q&A", "📝 Summary", "📄 Full Text"])
