@@ -15,6 +15,7 @@ from rank_bm25 import BM25Okapi
 import re
 from PIL import Image
 from google.cloud import vision
+from google.oauth2 import service_account
 import os
 
 # Download required NLTK data
@@ -30,14 +31,14 @@ MONTHLY_REQUEST_LIMIT = 1000  # Adjust based on your quota
 
 @st.cache_resource
 def get_vision_client():
-    """Initialize Google Vision API client (cached)"""
-    try:
-        # Expects GOOGLE_APPLICATION_CREDENTIALS environment variable
-        client = vision.ImageAnnotatorClient()
+    if "gcp_service_account" in st.secrets:
+        credentials = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"]
+        )
+        client = vision.ImageAnnotatorClient(credentials=credentials)
         return client
-    except Exception as e:
-        st.error(f"Failed to initialize Google Vision API: {str(e)}")
-        st.info("Make sure GOOGLE_APPLICATION_CREDENTIALS is set in Streamlit secrets")
+    else:
+        st.error("❌ Google Cloud credentials not found in secrets!")
         return None
 
 def extract_text_with_google_vision(pdf_path):
