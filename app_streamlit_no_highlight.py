@@ -13,7 +13,7 @@ from datetime import datetime
 import nltk
 from rank_bm25 import BM25Okapi
 import re
-from PIL import Image, ImageDraw  # ✅ ADDED ImageDraw
+from PIL import Image
 from google.cloud import vision
 from google.oauth2 import service_account
 import os
@@ -49,12 +49,11 @@ def get_vision_client():
         st.error(f"Failed to initialize Google Vision API: {str(e)}")
         return None
 
-# ✅ UPDATED: Now extracts bounding boxes too
 def extract_text_with_google_vision(pdf_path):
-    """Extract text AND bounding boxes from PDF"""
+    """Extract text from PDF using Google Vision API"""
     client = get_vision_client()
     if client is None:
-        return "", [], []
+        return "", []
 
     try:
         if isinstance(pdf_path, str):
@@ -73,7 +72,6 @@ def extract_text_with_google_vision(pdf_path):
 
         full_text = ""
         page_images = []
-        sentence_boxes = []  # ✅ NEW: Store bounding boxes
         progress_bar = st.progress(0)
 
         for idx, img in enumerate(images):
@@ -92,61 +90,17 @@ def extract_text_with_google_vision(pdf_path):
                 continue
 
             if response.full_text_annotation:
-                # Get full text
-                page_text = response.full_text_annotation.text
-                full_text += page_text + "\n\n"
-
-                # ✅ NEW: Extract sentence-level bounding boxes
-                for page in response.full_text_annotation.pages:
-                    for block in page.blocks:
-                        for paragraph in block.paragraphs:
-                            # Get paragraph text
-                            paragraph_text = ""
-                            for word in paragraph.words:
-                                word_text = ''.join([symbol.text for symbol in word.symbols])
-                                paragraph_text += word_text + " "
-
-                            # Get bounding box vertices
-                            vertices = paragraph.bounding_box.vertices
-                            box = {
-                                'text': paragraph_text.strip(),
-                                'box': [(v.x, v.y) for v in vertices],
-                                'page': idx
-                            }
-                            sentence_boxes.append(box)
+                full_text += response.full_text_annotation.text + "\n\n"
 
             progress_bar.progress((idx + 1) / len(images))
             time.sleep(0.5)
 
         progress_bar.empty()
-        return full_text.strip(), page_images, sentence_boxes
+        return full_text.strip(), page_images
 
     except Exception as e:
         st.error(f"Error during OCR: {str(e)}")
-        return "", [], []
-
-# ✅ NEW FUNCTION: Draw highlights
-def draw_highlight_on_image(image, bounding_box, color=(255, 255, 0, 100)):
-    """Draw semi-transparent highlight on image"""
-    img_copy = image.copy()
-    draw = ImageDraw.Draw(img_copy, 'RGBA')
-
-    if bounding_box and len(bounding_box) >= 2:
-        x_coords = [point[0] for point in bounding_box]
-        y_coords = [point[1] for point in bounding_box]
-
-        left = min(x_coords)
-        top = min(y_coords)
-        right = max(x_coords)
-        bottom = max(y_coords)
-
-        # Draw yellow highlight
-        draw.rectangle([left, top, right, bottom], 
-                      fill=color, 
-                      outline=(255, 200, 0, 255), 
-                      width=3)
-
-    return img_copy
+        return "", []
 
 # ==================== TTS MODULE ====================
 def load_tts_model():
@@ -159,7 +113,7 @@ def load_tts_model():
     return st.session_state.tts_model
 
 def generate_audio(text, max_length=2000):
-    """Generate audio from text"""
+    """Generate audio from text (supports longer text)"""
     try:
         model, tokenizer = load_tts_model()
         if len(text) > max_length:
@@ -290,9 +244,9 @@ def generate_summary(text, max_length=200, min_length=50):
             gc.collect()
             torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
-# ==================== PDF READER WITH HIGHLIGHTING ====================
+# ==================== PDF READER (SINGLE AUDIO) ====================
 def pdf_reader_tab():
-    """Interactive PDF reader with highlighting"""
+    """Interactive PDF reader with Manual & Single-Audio Auto-Play"""
     st.subheader("📖 PDF Reader with Text-to-Speech")
 
     if 'page_images' not in st.session_state or not st.session_state.page_images:
@@ -312,30 +266,9 @@ def pdf_reader_tab():
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        # ✅ UPDATED: Show highlighted image
-        base_image = st.session_state.page_images[page_idx]
-
-        # Get current sentence's bounding box
-        current_box = None
-        if ('sentence_boxes' in st.session_state and 
-            st.session_state.sentence_boxes and
-            'current_sentence_idx' in st.session_state and
-            st.session_state.current_sentence_idx < len(st.session_state.sentence_boxes)):
-
-            box_data = st.session_state.sentence_boxes[st.session_state.current_sentence_idx]
-            if box_data['page'] == page_idx:
-                current_box = box_data['box']
-
-        # Draw highlight if available
-        if current_box:
-            highlighted_image = draw_highlight_on_image(base_image, current_box)
-            st.image(highlighted_image, 
-                    caption=f"Page {page_num} 🟡 Highlighted", 
-                    use_column_width=True)
-        else:
-            st.image(base_image, 
-                    caption=f"Page {page_num}", 
-                    use_column_width=True)
+        st.image(st.session_state.page_images[page_idx],
+                caption=f"Page {page_num}",
+                use_column_width=True)
 
     with col2:
         st.markdown("**📄 Extracted Text**")
@@ -384,7 +317,7 @@ def pdf_reader_tab():
                             st.session_state.current_sentence_idx = min(len(sentences)-1, st.session_state.current_sentence_idx + 1)
                             st.rerun()
 
-                # ===== AUTO-PLAY MODE =====
+                # ===== AUTO-PLAY MODE (SINGLE AUDIO) =====
                 else:
                     st.markdown("**🎵 Continuous Audio Playback**")
                     st.info("💡 Generates ONE audio file for seamless listening")
@@ -394,22 +327,27 @@ def pdf_reader_tab():
                     with col_a:
                         if st.button("📄 Play Entire Page/Book", type="primary", use_container_width=True):
                             with st.spinner("Generating continuous audio..."):
+                                # Combine all remaining sentences
                                 remaining_sentences = sentences[st.session_state.current_sentence_idx:]
                                 combined_text = " ".join(remaining_sentences)
 
+                                # Show info about text length
                                 st.caption(f"Generating audio for {len(combined_text)} characters...")
 
+                                # Limit to prevent memory issues
                                 max_chars = 2000
                                 if len(combined_text) > max_chars:
                                     st.warning(f"⚠️ Text is long. Using first {max_chars} characters.")
                                     combined_text = combined_text[:max_chars]
 
+                                # Generate ONE audio file
                                 audio_data = generate_audio(combined_text, max_length=max_chars)
 
                                 if audio_data:
                                     st.success("✅ Audio generated! Playing...")
                                     st.audio(audio_data, format='audio/wav', autoplay=True)
 
+                                    # Move to last sentence
                                     st.session_state.current_sentence_idx = len(sentences) - 1
 
                                     st.balloons()
@@ -421,6 +359,7 @@ def pdf_reader_tab():
                             st.success("↩️ Reset to beginning")
                             st.rerun()
 
+                    # Additional option
                     st.markdown("---")
                     st.markdown("**Or play current line only:**")
                     if st.button("🔊 Play Current Sentence"):
@@ -448,20 +387,18 @@ def main():
         layout="wide"
     )
 
-    st.title("🎓 Bengali PDF Assistant - With Highlighting")
+    st.title("🎓 Bengali PDF Assistant - Memory Optimized")
     st.markdown("""
-    **Advanced NLP Pipeline with Visual Highlighting**
+    **Advanced NLP Pipeline with Continuous Audio Playback**
 
-    *Google Vision OCR • Sentence Highlighting • Quantized mT5 • Hybrid RAG • BanglaBERT QA • Continuous TTS*
+    *Google Vision OCR • Quantized mT5 • Hybrid RAG • BanglaBERT QA • Continuous TTS*
     """)
 
-    # ✅ Session state - added sentence_boxes
+    # Session state
     if 'processed_text' not in st.session_state:
         st.session_state.processed_text = None
     if 'page_images' not in st.session_state:
         st.session_state.page_images = []
-    if 'sentence_boxes' not in st.session_state:
-        st.session_state.sentence_boxes = []  # ✅ NEW
     if 'chunks' not in st.session_state:
         st.session_state.chunks = None
     if 'rag_setup' not in st.session_state:
@@ -478,19 +415,16 @@ def main():
                 with open(temp_path, 'wb') as f:
                     f.write(pdf_file.read())
 
-                # ✅ UPDATED: Now gets 3 values including boxes
-                text, images, boxes = extract_text_with_google_vision(temp_path)
+                text, images = extract_text_with_google_vision(temp_path)
                 os.remove(temp_path)
 
                 if text:
                     st.session_state.processed_text = text
                     st.session_state.page_images = images
-                    st.session_state.sentence_boxes = boxes  # ✅ NEW: Store boxes
                     st.session_state.chunks = semantic_chunk_text(text)
                     st.session_state.rag_setup = setup_rag_pipeline(st.session_state.chunks)
                     st.session_state.current_sentence_idx = 0
                     st.success(f"✅ Extracted {len(text)} characters")
-                    st.caption(f"🟡 Found {len(boxes)} text blocks for highlighting")
                 else:
                     st.error("Failed to extract text")
 
@@ -503,7 +437,7 @@ def main():
         st.info("👈 Upload a PDF to get started")
         st.markdown("""
         ### Features:
-        - 📖 **PDF Reader**: Visual highlighting + Audio
+        - 📖 **PDF Reader**: Manual & Continuous Audio modes
         - 💬 **Q&A**: Ask questions about your document
         - 📝 **Summary**: Quantized mT5 for memory efficiency
         - 🔊 **TTS**: Bengali continuous audio playback
