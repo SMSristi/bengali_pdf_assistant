@@ -530,29 +530,30 @@ def main():
     st.title("🎓 Bengali PDF Assistant")
     st.markdown("""
     **AI-Powered Document Processing & Interactive Reading Platform**
-
+    
     Transform your Bengali PDFs into an interactive audiobook experience.
     """)
 
-    with st.expander("📋 What This App Does", expanded=False):
+    # ✅ MAKE IT MORE VISIBLE - expanded=True by default
+    with st.expander("📋 What This App Does - Click to Learn More", expanded=True):
         col1, col2 = st.columns(2)
 
         with col1:
             st.markdown("""
             **🔍 Core Services:**
-            - **OCR Text Extraction**: Google Vision API for Bengali PDFs
-            - **Visual PDF Reader**: Sentence-by-sentence highlighting
-            - **Text-to-Speech**: Chunked audio for entire books
-            - **Smart Q&A**: RAG-based question answering
+            - **OCR Text Extraction**: Convert PDF images to text using Google Vision API
+            - **Visual PDF Reader**: Read with sentence-by-sentence highlighting
+            - **Text-to-Speech**: Listen to entire books with chunked audio
+            - **Smart Q&A**: Ask questions and get AI-powered answers
             """)
 
         with col2:
             st.markdown("""
             **✨ Advanced Features:**
-            - **Chunked Audio**: Handles books of any length
-            - **Manual Mode**: Navigate line-by-line
-            - **Extractive Summarization**: No heavy models needed
-            - **Memory Optimized**: Works on free Streamlit tier
+            - **Chunked Audio**: Handles books of any length automatically
+            - **Manual Mode**: Navigate line-by-line with full control
+            - **Extractive Summarization**: Instant summaries without heavy models
+            - **Memory Optimized**: Runs smoothly on free Streamlit tier
             """)
 
     # Session state
@@ -572,10 +573,11 @@ def main():
     # Sidebar
     with st.sidebar:
         st.header("📄 Upload PDF")
+        st.caption("Supports Bengali & English text")
         pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
 
         if pdf_file and st.button("🔬 Process PDF", type="primary"):
-            with st.spinner("Processing..."):
+            with st.spinner("Processing with Google Vision API..."):
                 temp_path = f"temp_{int(time.time())}.pdf"
                 with open(temp_path, 'wb') as f:
                     f.write(pdf_file.read())
@@ -595,6 +597,7 @@ def main():
                         del st.session_state.matched_sentence_boxes
 
                     st.success(f"✅ Extracted {len(text)} characters")
+                    st.caption(f"📄 {len(images)} pages processed")
                 else:
                     st.error("Failed to extract text")
 
@@ -602,11 +605,72 @@ def main():
         st.success("✅ Optimized for 1GB RAM")
         st.caption("• Summarizer: Disabled (-500MB)")
         st.caption("• Chunked TTS: Active")
+        
+        st.header("🛠️ Tech Stack")
+        st.caption("""
+        • Google Vision API
+        • BanglaBERT
+        • MMS-TTS Bengali
+        • FAISS + BM25
+        """)
 
-    # Main content
+    # ✅ ADD SERVICE CARDS WHEN NO PDF IS UPLOADED
     if st.session_state.processed_text is None:
-        st.info("👈 Upload a PDF to get started")
+        st.info("👈 Upload a PDF from the sidebar to get started")
+        
+        st.markdown("### 🎯 Our Services")
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.markdown("""
+            #### 📖 PDF Reader
+            **Interactive Reading**
+            - Visual highlighting
+            - Line-by-line navigation
+            - Audio playback
+            - Auto-Play mode
+            """)
+        
+        with col2:
+            st.markdown("""
+            #### 💬 Smart Q&A
+            **Ask Anything**
+            - Semantic search
+            - Context-aware answers
+            - Confidence scores
+            - Hybrid retrieval
+            """)
+        
+        with col3:
+            st.markdown("""
+            #### 📝 Summarization
+            **Quick Overview**
+            - Short/Medium/Long
+            - Memory-efficient
+            - Instant results
+            - Extractive method
+            """)
+        
+        with col4:
+            st.markdown("""
+            #### 🔊 Text-to-Speech
+            **Listen Anywhere**
+            - Bengali voice
+            - Continuous playback
+            - Chunked audio
+            - Manual control
+            """)
+        
+        st.markdown("---")
+        
+        st.markdown("""
+        ### 🎯 Perfect For:
+        📚 Students • 📄 Researchers • 👂 Audiobook Lovers • 🎓 Language Learners • 📖 Bengali Readers
+        """)
+        
     else:
+        # Main tabs (only show when PDF is uploaded)
         tabs = st.tabs(["📖 PDF Reader", "💬 Q&A", "📝 Summary", "📄 Full Text"])
 
         with tabs[0]:
@@ -614,6 +678,7 @@ def main():
 
         with tabs[1]:
             st.subheader("💬 Smart Question Answering")
+            st.caption("Powered by BanglaBERT + Hybrid RAG")
             question = st.text_input("Your question:")
 
             if st.button("💡 Get Answer", type="primary"):
@@ -632,8 +697,10 @@ def main():
                         st.success(f"**Answer:** {result['answer']}")
                         st.info(f"**Confidence:** {result['score']:.2%}")
 
-                        with st.expander("📚 Context"):
+                        with st.expander("📚 Retrieved Context"):
                             st.text(context)
+                else:
+                    st.warning("Please enter a question")
 
         with tabs[2]:
             st.subheader("📝 Extractive Summarization")
