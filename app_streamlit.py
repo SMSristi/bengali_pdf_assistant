@@ -392,20 +392,23 @@ def generate_summary(text, max_length=200, min_length=50):
 
 # ==================== PDF READER WITH CHUNKED AUDIO ====================
 def pdf_reader_tab():
-    """Interactive PDF reader with chunked audio for long texts"""
+    """Interactive PDF reader with page-by-page audio"""
     st.subheader("📖 PDF Reader with Text-to-Speech")
 
     if 'page_images' not in st.session_state or not st.session_state.page_images:
         st.warning("Please process a PDF first in the sidebar")
         return
 
-    page_num = st.selectbox(
-        "Select Page",
-        range(1, len(st.session_state.page_images) + 1),
-        format_func=lambda x: f"Page {x}"
-    )
+    # ✅ Initialize current_page in session state
+    if 'current_page' not in st.session_state:
+        st.session_state.current_page = 0
 
-    page_idx = page_num - 1
+    # ✅ Use session state for page selection
+    page_idx = st.session_state.current_page
+    page_num = page_idx + 1
+
+    # ✅ Display page selector with current page
+    st.markdown(f"**📄 Current Page: {page_num} of {len(st.session_state.page_images)}**")
 
     col1, col2 = st.columns([1, 1])
 
@@ -451,7 +454,7 @@ def pdf_reader_tab():
 
             reading_mode = st.radio(
                 "Reading Mode:",
-                ["🎯 Manual (Line by line)", "▶️ Auto-Play (Continuous audio)"],
+                ["🎯 Manual (Line by line)", "▶️ Auto-Play (Page-by-Page Audio)"],
                 horizontal=False
             )
 
@@ -481,38 +484,57 @@ def pdf_reader_tab():
                             st.session_state.current_sentence_idx += 1
                             st.rerun()
 
-                # ✅ AUTO-PLAY WITH CHUNKING
+                # ✅ PAGE-BY-PAGE AUDIO MODE
                 else:
-                    st.markdown("**🎵 Continuous Audio (Chunked)**")
-                    st.caption("💡 Automatically splits long text into chunks and combines audio")
-
-                    col_a, col_b = st.columns(2)
-
-                    with col_a:
-                        if st.button("📄 Play Entire Book", type="primary", width="stretch"):
-                            remaining_text = " ".join(sentences[st.session_state.current_sentence_idx:])
-
-                            with st.spinner("Generating complete audiobook..."):
-                                # Use chunked audio generation
-                                audio_data = generate_audio_chunked(remaining_text, chunk_size=1500)
-
-                                if audio_data:
-                                    st.success("✅ Audiobook ready! Playing...")
-                                    st.audio(audio_data, format='audio/wav', autoplay=True)
-                                    st.session_state.current_sentence_idx = len(sentences) - 1
-                                    st.balloons()
-                                else:
-                                    st.error("Failed to generate audio")
-
-                    with col_b:
-                        if st.button("🔄 Restart", width="stretch"):
-                            st.session_state.current_sentence_idx = 0
-                            st.rerun()
+                    st.markdown("**🎵 Page-by-Page Audio**")
+                    st.caption("💡 Generates audio for current page only - memory efficient!")
+                    
+                    # Get current page sentences only
+                    current_page_sentences = []
+                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+                        if sent_data['page'] == page_idx:
+                            current_page_sentences.append(sent_data['text'])
+                    
+                    if current_page_sentences:
+                        current_page_text = " ".join(current_page_sentences)
+                        
+                        col_a, col_b, col_c = st.columns(3)
+                        
+                        with col_a:
+                            if st.button("▶️ Play This Page", type="primary", width="stretch"):
+                                with st.spinner(f"Generating audio for page {page_num}..."):
+                                    audio_data = generate_audio(current_page_text, max_length=2000)
+                                    
+                                    if audio_data:
+                                        st.success("✅ Audio ready!")
+                                        st.audio(audio_data, format='audio/wav', autoplay=True)
+                                        del audio_data
+                                        gc.collect()
+                        
+                        with col_b:
+                            # ✅ WORKING PREV BUTTON
+                            if st.button("⏮️ Prev Page", width="stretch", disabled=(page_idx == 0)):
+                                st.session_state.current_page -= 1  # Change page
+                                gc.collect()
+                                st.rerun()
+                        
+                        with col_c:
+                            # ✅ WORKING NEXT BUTTON
+                            if st.button("⏭️ Next Page", width="stretch", 
+                                        disabled=(page_idx >= len(st.session_state.page_images)-1)):
+                                st.session_state.current_page += 1  # Change page
+                                gc.collect()
+                                st.rerun()
+                        
+                        st.caption(f"📄 Page {page_num} of {len(st.session_state.page_images)} | "
+                                  f"{len(current_page_sentences)} sentences on this page")
+                    else:
+                        st.warning("No text found on this page")
 
                 st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
                 st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
-
-                with st.expander("📑 View All"):
+                
+                with st.expander("📑 View All Sentences"):
                     for idx, sent in enumerate(sentences):
                         if idx == st.session_state.current_sentence_idx:
                             st.markdown(f"**➤ {sent}**")
