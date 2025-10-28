@@ -352,11 +352,11 @@ def pdf_reader_tab():
             highlighted_image = draw_highlight_on_image(base_image, current_box)
             st.image(highlighted_image, 
                     caption=f"Page {page_num} 🟡 Highlighted", 
-                    use_container_width=True)
+                    width="stretch")
         else:
             st.image(base_image, 
                     caption=f"Page {page_num}", 
-                    use_container_width=True)
+                    width="stretch")
 
     with col2:
         st.markdown("**📄 Extracted Text**")
@@ -415,7 +415,7 @@ def pdf_reader_tab():
                     col_a, col_b = st.columns(2)
 
                     with col_a:
-                        if st.button("📄 Play All", type="primary", use_container_width=True):
+                        if st.button("📄 Play All", type="primary", width="stretch"):
                             remaining = sentences[st.session_state.current_sentence_idx:]
                             combined = " ".join(remaining)
 
@@ -430,7 +430,7 @@ def pdf_reader_tab():
                                 st.balloons()
 
                     with col_b:
-                        if st.button("🔄 Restart", use_container_width=True):
+                        if st.button("🔄 Restart", width="stretch"):
                             st.session_state.current_sentence_idx = 0
                             st.rerun()
 
