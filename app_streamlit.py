@@ -48,13 +48,83 @@ def get_vision_client():
         st.error(f"Failed to initialize Google Vision API: {str(e)}")
         return None
 
-def extract_text_with_google_vision(pdf_path):
-    """Extract text with paragraph-level bounding boxes"""
+# def extract_text_with_google_vision(pdf_path):
+#     """Extract text with paragraph-level bounding boxes"""
+#     client = get_vision_client()
+#     if client is None:
+#         return "", [], []
+
+#     try:
+#         if isinstance(pdf_path, str):
+#             with open(pdf_path, 'rb') as f:
+#                 pdf_bytes = f.read()
+#         elif hasattr(pdf_path, 'read'):
+#             pdf_bytes = pdf_path.read()
+#         else:
+#             pdf_bytes = pdf_path
+
+#         images = convert_from_bytes(pdf_bytes)
+
+#         if len(images) > MAX_PAGES_PER_REQUEST:
+#             st.warning(f"⚠️ Processing first {MAX_PAGES_PER_REQUEST} pages")
+#             images = images[:MAX_PAGES_PER_REQUEST]
+
+#         full_text = ""
+#         page_images = []
+#         paragraph_boxes = []
+#         progress_bar = st.progress(0)
+
+#         for idx, img in enumerate(images):
+#             page_images.append(img)
+
+#             img_byte_arr = io.BytesIO()
+#             img.save(img_byte_arr, format='PNG')
+#             img_byte_arr = img_byte_arr.getvalue()
+
+#             image = vision.Image(content=img_byte_arr)
+#             image_context = vision.ImageContext(language_hints=["bn", "en"])
+#             response = client.document_text_detection(image=image, image_context=image_context)
+
+#             if response.error.message:
+#                 st.error(f"Error on page {idx + 1}: {response.error.message}")
+#                 continue
+
+#             if response.full_text_annotation:
+#                 page_text = response.full_text_annotation.text
+#                 full_text += page_text + "\n\n"
+
+#                 for page in response.full_text_annotation.pages:
+#                     for block in page.blocks:
+#                         for paragraph in block.paragraphs:
+#                             paragraph_text = ""
+#                             for word in paragraph.words:
+#                                 word_text = ''.join([symbol.text for symbol in word.symbols])
+#                                 paragraph_text += word_text + " "
+
+#                             vertices = paragraph.bounding_box.vertices
+#                             paragraph_boxes.append({
+#                                 'text': paragraph_text.strip(),
+#                                 'box': [(v.x, v.y) for v in vertices],
+#                                 'page': idx
+#                             })
+
+#             progress_bar.progress((idx + 1) / len(images))
+#             time.sleep(0.5)
+
+#         progress_bar.empty()
+#         return full_text.strip(), page_images, paragraph_boxes
+
+#     except Exception as e:
+#         st.error(f"Error during OCR: {str(e)}")
+#         return "", [], []
+def extract_text_with_google_vision(pdf_path, max_pages=3):
+    """Extract text with memory optimization"""
     client = get_vision_client()
     if client is None:
         return "", [], []
-
+    
     try:
+        # Read PDF bytes
         if isinstance(pdf_path, str):
             with open(pdf_path, 'rb') as f:
                 pdf_bytes = f.read()
@@ -62,37 +132,49 @@ def extract_text_with_google_vision(pdf_path):
             pdf_bytes = pdf_path.read()
         else:
             pdf_bytes = pdf_path
-
-        images = convert_from_bytes(pdf_bytes)
-
-        if len(images) > MAX_PAGES_PER_REQUEST:
-            st.warning(f"⚠️ Processing first {MAX_PAGES_PER_REQUEST} pages")
-            images = images[:MAX_PAGES_PER_REQUEST]
-
+        
+        # ✅ OPTIMIZED: Lower DPI and use JPEG
+        images = convert_from_bytes(
+            pdf_bytes, 
+            dpi=150,  # Reduced from default 200
+            fmt='jpeg',
+            thread_count=1
+        )
+        
+        # Limit pages
+        if len(images) > max_pages:
+            st.warning(f"⚠️ Processing first {max_pages} pages to save memory")
+            images = images[:max_pages]
+        
         full_text = ""
         page_images = []
         paragraph_boxes = []
         progress_bar = st.progress(0)
-
+        
         for idx, img in enumerate(images):
-            page_images.append(img)
-
+            # ✅ OPTIMIZED: Resize large images
+            if img.width > 1500 or img.height > 1500:
+                img.thumbnail((1500, 1500), Image.LANCZOS)
+            
+            page_images.append(img.copy())  # Store a copy
+            
+            # ✅ OPTIMIZED: Compress before sending to API
             img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='PNG')
+            img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
             img_byte_arr = img_byte_arr.getvalue()
-
+            
             image = vision.Image(content=img_byte_arr)
             image_context = vision.ImageContext(language_hints=["bn", "en"])
             response = client.document_text_detection(image=image, image_context=image_context)
-
+            
             if response.error.message:
                 st.error(f"Error on page {idx + 1}: {response.error.message}")
                 continue
-
+            
             if response.full_text_annotation:
                 page_text = response.full_text_annotation.text
                 full_text += page_text + "\n\n"
-
+                
                 for page in response.full_text_annotation.pages:
                     for block in page.blocks:
                         for paragraph in block.paragraphs:
@@ -100,20 +182,27 @@ def extract_text_with_google_vision(pdf_path):
                             for word in paragraph.words:
                                 word_text = ''.join([symbol.text for symbol in word.symbols])
                                 paragraph_text += word_text + " "
-
+                            
                             vertices = paragraph.bounding_box.vertices
                             paragraph_boxes.append({
                                 'text': paragraph_text.strip(),
                                 'box': [(v.x, v.y) for v in vertices],
                                 'page': idx
                             })
-
+            
+            # ✅ CLEAR MEMORY AFTER EACH PAGE
+            del img, img_byte_arr, image, response
+            if idx % 2 == 0:
+                gc.collect()
+            
             progress_bar.progress((idx + 1) / len(images))
-            time.sleep(0.5)
-
+            time.sleep(0.3)  # Reduced from 0.5
+        
         progress_bar.empty()
+        gc.collect()  # Final cleanup
+        
         return full_text.strip(), page_images, paragraph_boxes
-
+    
     except Exception as e:
         st.error(f"Error during OCR: {str(e)}")
         return "", [], []
@@ -599,12 +688,19 @@ def main():
         pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
 
         if pdf_file and st.button("🔬 Process PDF", type="primary"):
+            max_pages = st.sidebar.slider("Pages to process", 1, 10, 3, 
+                                        help="Reduce if app crashes")
+            
             with st.spinner("Processing with Google Vision API..."):
                 temp_path = f"temp_{int(time.time())}.pdf"
                 with open(temp_path, 'wb') as f:
                     f.write(pdf_file.read())
-
-                text, images, paragraph_boxes = extract_text_with_google_vision(temp_path)
+                
+                text, images, paragraph_boxes = extract_text_with_google_vision(
+                    temp_path, 
+                    max_pages=max_pages  # ✅ Pass the limit
+                )
+                
                 os.remove(temp_path)
 
                 if text:
