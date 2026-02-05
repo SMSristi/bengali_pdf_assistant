@@ -678,6 +678,15 @@ def pdf_reader_tab():
             )
 
             if sentences:
+                    # ⭐ CHANGED: Create sentence-to-page mapping FIRST, before anything else
+                if ('matched_sentence_boxes' not in st.session_state or 
+                    not st.session_state.matched_sentence_boxes):
+                    if 'paragraph_boxes' in st.session_state:
+                        with st.spinner("Mapping sentences to pages..."):
+                            st.session_state.matched_sentence_boxes = match_sentences_to_boxes(
+                                sentences,
+                                st.session_state.paragraph_boxes
+                            )
                 current_sentence = sentences[st.session_state.current_sentence_idx]
                 st.markdown("**Current Line:**")
                 st.info(current_sentence)
