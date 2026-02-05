@@ -19,6 +19,7 @@ from google.cloud import texttospeech
 from google.oauth2 import service_account
 import os
 
+
 # Download NLTK data
 try:
     nltk.data.find('tokenizers/punkt')
