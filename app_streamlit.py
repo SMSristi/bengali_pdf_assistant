@@ -437,6 +437,181 @@ def generate_summary(text, max_length=200, min_length=50):
     return " ".join(summary_sentences)
 
 # ==================== PDF READER WITH ON-DEMAND TTS ====================
+# def pdf_reader_tab():
+#     """Interactive PDF reader with on-demand TTS"""
+#     st.subheader("📖 PDF Reader with Text-to-Speech")
+
+#     if 'page_images' not in st.session_state or not st.session_state.page_images:
+#         st.warning("Please process a PDF first in the sidebar")
+#         return
+
+#     # Initialize current_page
+#     if 'current_page' not in st.session_state:
+#         st.session_state.current_page = 0
+
+#     page_idx = st.session_state.current_page
+#     page_num = page_idx + 1
+
+#     st.markdown(f"**📄 Current Page: {page_num} of {len(st.session_state.page_images)}**")
+
+#     col1, col2 = st.columns([1, 1])
+
+#     with col1:
+#         base_image = st.session_state.page_images[page_idx]
+#         current_box = None
+
+#         if ('matched_sentence_boxes' in st.session_state and
+#             st.session_state.matched_sentence_boxes and
+#             'current_sentence_idx' in st.session_state and
+#             st.session_state.current_sentence_idx < len(st.session_state.matched_sentence_boxes)):
+
+#             box_data = st.session_state.matched_sentence_boxes[st.session_state.current_sentence_idx]
+#             if box_data['box'] and box_data['page'] == page_idx:
+#                 current_box = box_data['box']
+
+#         if current_box:
+#             highlighted_image = draw_highlight_on_image(base_image, current_box)
+#             st.image(highlighted_image,
+#                     caption=f"Page {page_num} 🟡 Highlighted",
+#                     use_container_width=True)
+#         else:
+#             st.image(base_image,
+#                     caption=f"Page {page_num}",
+#                     use_container_width=True)
+
+#     with col2:
+#         st.markdown("**📄 Extracted Text**")
+
+#         if 'processed_text' in st.session_state:
+#             all_text = st.session_state.processed_text
+#             sentences = split_into_sentences(all_text)
+
+#             if ('matched_sentence_boxes' not in st.session_state and
+#                 'paragraph_boxes' in st.session_state):
+#                 st.session_state.matched_sentence_boxes = match_sentences_to_boxes(
+#                     sentences,
+#                     st.session_state.paragraph_boxes
+#                 )
+
+#             if 'current_sentence_idx' not in st.session_state:
+#                 st.session_state.current_sentence_idx = 0
+
+#             reading_mode = st.radio(
+#                 "Reading Mode:",
+#                 ["🎯 Manual (Line by line)", "▶️ Auto-Play (Page-by-Page Audio)"],
+#                 horizontal=False
+#             )
+
+#             if sentences:
+#                 current_sentence = sentences[st.session_state.current_sentence_idx]
+#                 st.markdown("**Current Line:**")
+#                 st.info(current_sentence)
+
+#                 # Manual mode
+#                 if reading_mode == "🎯 Manual (Line by line)":
+#                     col_a, col_b, col_c = st.columns(3)
+
+#                     with col_a:
+#                         if st.button("⏮️ Previous", disabled=st.session_state.current_sentence_idx == 0):
+#                             st.session_state.current_sentence_idx -= 1
+#                             st.rerun()
+
+#                     with col_b:
+#                         # ✅ CHANGED: Audio generated only on button click
+#                         if st.button("🔊 Read Aloud"):
+#                             with st.spinner("Generating audio..."):
+#                                 audio_data = generate_audio_facebook(current_sentence, max_length=1500)
+#                                 if audio_data:
+#                                     st.audio(audio_data, format='audio/wav', autoplay=True)
+#                                     del audio_data
+#                                     gc.collect()
+
+#                     with col_c:
+#                         if st.button("⏭️ Next", disabled=st.session_state.current_sentence_idx >= len(sentences)-1):
+#                             st.session_state.current_sentence_idx += 1
+#                             st.rerun()
+
+#                 # PAGE-BY-PAGE AUDIO MODE WITH DUAL TTS
+#                 else:
+#                     st.markdown("**🎵 Page-by-Page Audio**")
+
+#                     # TTS Selection
+#                     tts_option = st.radio(
+#                         "Select TTS Engine:",
+#                         ["🆓 Free (Facebook MMS)", "🎙️ Premium (Google Cloud - Paid after page 1)"],
+#                         horizontal=True,
+#                         help="Free version available always. Premium version (more natural) is free for first page only."
+#                     )
+
+#                     use_google = "Premium" in tts_option
+
+#                     # Warning for paid usage
+#                     if use_google and page_num > 1:
+#                         st.warning("⚠️ You're using Premium TTS (Page 2+). This will incur Google Cloud charges.")
+#                     elif use_google and page_num == 1:
+#                         st.success("✅ First page is FREE with Premium TTS!")
+
+#                     # Get current page sentences
+#                     current_page_sentences = []
+#                     for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+#                         if sent_data['page'] == page_idx:
+#                             current_page_sentences.append(sent_data['text'])
+
+#                     if current_page_sentences:
+#                         current_page_text = " ".join(current_page_sentences)
+
+#                         col_a, col_b, col_c = st.columns(3)
+
+#                         with col_a:
+#                             # ✅ CHANGED: Audio generated only when Play button is clicked
+#                             if st.button("▶️ Play This Page", type="primary", use_container_width=True):
+#                                 with st.spinner(f"Generating audio for page {page_num}..."):
+#                                     if use_google and page_num == 1:
+#                                         # First page with Google TTS (free)
+#                                         audio_data = generate_audio_google(current_page_text)
+#                                     elif use_google and page_num > 1:
+#                                         # Paid Google TTS
+#                                         st.info("💰 Using paid Google TTS...")
+#                                         audio_data = generate_audio_google(current_page_text)
+#                                     else:
+#                                         # Always free Facebook TTS
+#                                         audio_data = generate_audio_facebook(current_page_text, max_length=2000)
+
+#                                     if audio_data:
+#                                         st.success("✅ Audio ready!")
+#                                         st.audio(audio_data, format='audio/wav', autoplay=True)
+#                                         # ✅ CHANGED: Immediately clear audio from memory
+#                                         del audio_data
+#                                         gc.collect()
+
+#                         with col_b:
+#                             if st.button("⏮️ Prev Page", use_container_width=True, disabled=(page_idx == 0)):
+#                                 st.session_state.current_page -= 1
+#                                 gc.collect()
+#                                 st.rerun()
+
+#                         with col_c:
+#                             if st.button("⏭️ Next Page", use_container_width=True,
+#                                        disabled=(page_idx >= len(st.session_state.page_images)-1)):
+#                                 st.session_state.current_page += 1
+#                                 gc.collect()
+#                                 st.rerun()
+
+#                         st.caption(f"📄 Page {page_num} of {len(st.session_state.page_images)} | "
+#                                  f"{len(current_page_sentences)} sentences on this page")
+#                     else:
+#                         st.warning("No text found on this page")
+
+#                 st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
+#                 st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
+
+#                 with st.expander("📑 View All Sentences"):
+#                     for idx, sent in enumerate(sentences):
+#                         if idx == st.session_state.current_sentence_idx:
+#                             st.markdown(f"**➤ {sent}**")
+#                         else:
+#                             st.markdown(sent)
+
 def pdf_reader_tab():
     """Interactive PDF reader with on-demand TTS"""
     st.subheader("📖 PDF Reader with Text-to-Speech")
@@ -514,10 +689,13 @@ def pdf_reader_tab():
                     with col_a:
                         if st.button("⏮️ Previous", disabled=st.session_state.current_sentence_idx == 0):
                             st.session_state.current_sentence_idx -= 1
+                            # 🔧 FIX 1: Sync page when navigating sentences
+                            if 'matched_sentence_boxes' in st.session_state:
+                                new_page = st.session_state.matched_sentence_boxes[st.session_state.current_sentence_idx]['page']
+                                st.session_state.current_page = new_page
                             st.rerun()
 
                     with col_b:
-                        # ✅ CHANGED: Audio generated only on button click
                         if st.button("🔊 Read Aloud"):
                             with st.spinner("Generating audio..."):
                                 audio_data = generate_audio_facebook(current_sentence, max_length=1500)
@@ -529,6 +707,10 @@ def pdf_reader_tab():
                     with col_c:
                         if st.button("⏭️ Next", disabled=st.session_state.current_sentence_idx >= len(sentences)-1):
                             st.session_state.current_sentence_idx += 1
+                            # 🔧 FIX 2: Sync page when navigating sentences
+                            if 'matched_sentence_boxes' in st.session_state:
+                                new_page = st.session_state.matched_sentence_boxes[st.session_state.current_sentence_idx]['page']
+                                st.session_state.current_page = new_page
                             st.rerun()
 
                 # PAGE-BY-PAGE AUDIO MODE WITH DUAL TTS
@@ -553,9 +735,11 @@ def pdf_reader_tab():
 
                     # Get current page sentences
                     current_page_sentences = []
-                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
-                        if sent_data['page'] == page_idx:
-                            current_page_sentences.append(sent_data['text'])
+                    # 🔧 FIX 3: Only check if matched_sentence_boxes exists
+                    if 'matched_sentence_boxes' in st.session_state:
+                        for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+                            if sent_data['page'] == page_idx:
+                                current_page_sentences.append(sent_data['text'])
 
                     if current_page_sentences:
                         current_page_text = " ".join(current_page_sentences)
@@ -563,7 +747,6 @@ def pdf_reader_tab():
                         col_a, col_b, col_c = st.columns(3)
 
                         with col_a:
-                            # ✅ CHANGED: Audio generated only when Play button is clicked
                             if st.button("▶️ Play This Page", type="primary", use_container_width=True):
                                 with st.spinner(f"Generating audio for page {page_num}..."):
                                     if use_google and page_num == 1:
@@ -580,13 +763,18 @@ def pdf_reader_tab():
                                     if audio_data:
                                         st.success("✅ Audio ready!")
                                         st.audio(audio_data, format='audio/wav', autoplay=True)
-                                        # ✅ CHANGED: Immediately clear audio from memory
                                         del audio_data
                                         gc.collect()
 
                         with col_b:
                             if st.button("⏮️ Prev Page", use_container_width=True, disabled=(page_idx == 0)):
                                 st.session_state.current_page -= 1
+                                # 🔧 FIX 4: Reset sentence index to first sentence of new page
+                                if 'matched_sentence_boxes' in st.session_state:
+                                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+                                        if sent_data['page'] == st.session_state.current_page:
+                                            st.session_state.current_sentence_idx = idx
+                                            break
                                 gc.collect()
                                 st.rerun()
 
@@ -594,6 +782,12 @@ def pdf_reader_tab():
                             if st.button("⏭️ Next Page", use_container_width=True,
                                        disabled=(page_idx >= len(st.session_state.page_images)-1)):
                                 st.session_state.current_page += 1
+                                # 🔧 FIX 5: Reset sentence index to first sentence of new page
+                                if 'matched_sentence_boxes' in st.session_state:
+                                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+                                        if sent_data['page'] == st.session_state.current_page:
+                                            st.session_state.current_sentence_idx = idx
+                                            break
                                 gc.collect()
                                 st.rerun()
 
@@ -601,6 +795,30 @@ def pdf_reader_tab():
                                  f"{len(current_page_sentences)} sentences on this page")
                     else:
                         st.warning("No text found on this page")
+                        # 🔧 FIX 6: Add navigation buttons even when no text on page
+                        col_a, col_b = st.columns(2)
+                        with col_a:
+                            if st.button("⏮️ Prev Page (No Text)", use_container_width=True, disabled=(page_idx == 0)):
+                                st.session_state.current_page -= 1
+                                if 'matched_sentence_boxes' in st.session_state:
+                                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+                                        if sent_data['page'] == st.session_state.current_page:
+                                            st.session_state.current_sentence_idx = idx
+                                            break
+                                gc.collect()
+                                st.rerun()
+                        
+                        with col_b:
+                            if st.button("⏭️ Next Page (No Text)", use_container_width=True,
+                                       disabled=(page_idx >= len(st.session_state.page_images)-1)):
+                                st.session_state.current_page += 1
+                                if 'matched_sentence_boxes' in st.session_state:
+                                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+                                        if sent_data['page'] == st.session_state.current_page:
+                                            st.session_state.current_sentence_idx = idx
+                                            break
+                                gc.collect()
+                                st.rerun()
 
                 st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
                 st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
@@ -611,6 +829,7 @@ def pdf_reader_tab():
                             st.markdown(f"**➤ {sent}**")
                         else:
                             st.markdown(sent)
+
 
 # ==================== MAIN APP ====================
 def main():
