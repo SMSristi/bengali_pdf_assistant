@@ -18,7 +18,7 @@ from google.cloud import vision
 from google.cloud import texttospeech
 from google.oauth2 import service_account
 import os
-from PyPDF2 import PdfReader, PdfWriter
+from pypdf import PdfReader, PdfWriter
 
 # Download NLTK data
 try:
