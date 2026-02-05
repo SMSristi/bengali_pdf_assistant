@@ -887,10 +887,11 @@ def main():
 
         pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
 
-        if pdf_file and st.button("🔬 Process PDF", type="primary"):
-            max_pages = st.sidebar.slider("Pages to process", 1, 10, 3,
-                                         help="Reduce if app crashes")
+        # 🔧 FIX 1: Move slider OUTSIDE the button block so it's always visible
+        max_pages = st.slider("Pages to process", 1, 10, 3,
+                            help="Reduce if app crashes")
 
+        if pdf_file and st.button("🔬 Process PDF", type="primary"):
             with st.spinner("Processing with Google Vision API..."):
                 temp_path = f"temp_{int(time.time())}.pdf"
                 with open(temp_path, 'wb') as f:
@@ -909,13 +910,20 @@ def main():
                     st.session_state.paragraph_boxes = paragraph_boxes
                     st.session_state.chunks = semantic_chunk_text(text)
                     st.session_state.rag_setup = setup_rag_pipeline(st.session_state.chunks)
+                    
+                    # 🔧 FIX 2: Reset ALL navigation state when processing new PDF
                     st.session_state.current_sentence_idx = 0
-
+                    st.session_state.current_page = 0  # ← ADD THIS LINE
+                    
+                    # 🔧 FIX 3: Clear matched boxes to force re-matching
                     if 'matched_sentence_boxes' in st.session_state:
                         del st.session_state.matched_sentence_boxes
 
                     st.success(f"✅ Extracted {len(text)} characters")
                     st.caption(f"📄 {len(images)} pages processed")
+                    
+                    # 🔧 FIX 4: Force rerun to update the UI immediately
+                    st.rerun()
                 else:
                     st.error("Failed to extract text")
 
@@ -928,6 +936,7 @@ def main():
         st.success("✅ Auto memory management")
         st.caption("• Audio generated on-demand only")
         st.caption("• PDF compressed internally")
+
 
     if st.session_state.processed_text is None:
         st.info("👈 Upload a PDF from the sidebar to get started")
