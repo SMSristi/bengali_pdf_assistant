@@ -1,866 +1,966 @@
 import streamlit as st
+
 from pdf2image import convert_from_bytes
+
 from transformers import pipeline, VitsModel, AutoTokenizer, AutoModelForQuestionAnswering
+
 import faiss
+
 import numpy as np
+
 from sentence_transformers import SentenceTransformer
+
 import torch
+
 import scipy.io.wavfile as wavfile
+
 import io
+
 import time
+
 import gc
+
 from datetime import datetime
+
 import nltk
+
 from rank_bm25 import BM25Okapi
+
 import re
+
 from PIL import Image, ImageDraw
+
 from google.cloud import vision
+
 from google.cloud import texttospeech
+
 from google.oauth2 import service_account
+
 import os
 
-
 # Download NLTK data
+
 try:
-    nltk.data.find('tokenizers/punkt')
+
+nltk.data.find('tokenizers/punkt')
+
 except LookupError:
-    nltk.download('punkt', quiet=True)
+
+nltk.download('punkt', quiet=True)
 
 # ==================== MEMORY OPTIMIZATION ====================
+
 torch.set_num_threads(1)
+
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 # ==================== GOOGLE VISION API ====================
+
 MAX_PAGES_PER_REQUEST = 5
 
 @st.cache_resource
+
 def get_vision_client():
-    """Initialize Google Vision API client"""
-    try:
-        if "gcp_service_account" in st.secrets:
-            credentials = service_account.Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"]
-            )
-            client = vision.ImageAnnotatorClient(credentials=credentials)
-            return client
-        else:
-            st.error("❌ Google Cloud credentials not found in secrets!")
-            return None
-    except Exception as e:
-        st.error(f"Failed to initialize Google Vision API: {str(e)}")
-        return None
+
+"""Initialize Google Vision API client"""
+
+try:
+
+if "gcp_service_account" in st.secrets:
+
+credentials = service_account.Credentials.from_service_account_info(
+
+st.secrets["gcp_service_account"]
+
+)
+
+client = vision.ImageAnnotatorClient(credentials=credentials)
+
+return client
+
+else:
+
+st.error("❌ Google Cloud credentials not found in secrets!")
+
+return None
+
+except Exception as e:
+
+st.error(f"Failed to initialize Google Vision API: {str(e)}")
+
+return None
 
 @st.cache_resource
+
 def get_google_tts_client():
-    """Initialize Google Cloud TTS client"""
-    try:
-        if "gcp_service_account" in st.secrets:
-            credentials = service_account.Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"]
-            )
-            client = texttospeech.TextToSpeechClient(credentials=credentials)
-            return client
-        else:
-            return None
-    except Exception as e:
-        st.warning(f"Google TTS not available: {str(e)}")
-        return None
+
+"""Initialize Google Cloud TTS client"""
+
+try:
+
+if "gcp_service_account" in st.secrets:
+
+credentials = service_account.Credentials.from_service_account_info(
+
+st.secrets["gcp_service_account"]
+
+)
+
+client = texttospeech.TextToSpeechClient(credentials=credentials)
+
+return client
+
+else:
+
+return None
+
+except Exception as e:
+
+st.warning(f"Google TTS not available: {str(e)}")
+
+return None
+
+# ==================== PDF COMPRESSION OPTIMIZATION ====================
+
+def compress_image_for_api(image, max_width=1500, max_height=1500, quality=75):
+    """
+    Compress image internally to save memory and API costs.
+    ✅ Reduces file size before sending to Google Vision API
+    """
+    img = image.copy()
+    
+    # Resize if too large
+    if img.width > max_width or img.height > max_height:
+        img.thumbnail((max_width, max_height), Image.LANCZOS)
+    
+    # Save to BytesIO with compression
+    img_byte_arr = io.BytesIO()
+    img.save(img_byte_arr, format='JPEG', quality=quality, optimize=True)
+    img_byte_arr.seek(0)
+    
+    compressed_bytes = img_byte_arr.getvalue()
+    
+    # Calculate compression ratio for logging
+    original_size = len(image.tobytes())
+    compressed_size = len(compressed_bytes)
+    ratio = (1 - compressed_size / original_size) * 100 if original_size > 0 else 0
+    
+    return compressed_bytes, ratio
 
 def extract_text_with_google_vision(pdf_path, max_pages=3):
-    """Extract text with memory optimization"""
-    client = get_vision_client()
-    if client is None:
-        return "", [], []
 
-    try:
-        # Read PDF bytes
-        if isinstance(pdf_path, str):
-            with open(pdf_path, 'rb') as f:
-                pdf_bytes = f.read()
-        elif hasattr(pdf_path, 'read'):
-            pdf_bytes = pdf_path.read()
-        else:
-            pdf_bytes = pdf_path
+"""Extract text with aggressive memory optimization and internal PDF compression"""
 
-        # ✅ OPTIMIZED: Lower DPI and use JPEG
-        images = convert_from_bytes(
-            pdf_bytes,
-            dpi=150,
-            fmt='jpeg',
-            thread_count=1
-        )
+client = get_vision_client()
 
-        # Limit pages
-        if len(images) > max_pages:
-            st.warning(f"⚠️ Processing first {max_pages} pages to save memory")
-            images = images[:max_pages]
+if client is None:
 
-        full_text = ""
-        page_images = []
-        paragraph_boxes = []
-        progress_bar = st.progress(0)
+return "", [], []
 
-        for idx, img in enumerate(images):
-            # ✅ OPTIMIZED: Resize large images
-            if img.width > 1500 or img.height > 1500:
-                img.thumbnail((1500, 1500), Image.LANCZOS)
+try:
 
-            page_images.append(img.copy())
+# Read PDF bytes
 
-            # ✅ OPTIMIZED: Compress before sending to API
-            img_byte_arr = io.BytesIO()
-            img.save(img_byte_arr, format='JPEG', quality=85, optimize=True)
-            img_byte_arr = img_byte_arr.getvalue()
+if isinstance(pdf_path, str):
 
-            image = vision.Image(content=img_byte_arr)
-            image_context = vision.ImageContext(language_hints=["bn", "en"])
+with open(pdf_path, 'rb') as f:
 
-            response = client.document_text_detection(image=image, image_context=image_context)
+pdf_bytes = f.read()
 
-            if response.error.message:
-                st.error(f"Error on page {idx + 1}: {response.error.message}")
-                continue
+elif hasattr(pdf_path, 'read'):
 
-            if response.full_text_annotation:
-                page_text = response.full_text_annotation.text
-                full_text += page_text + "\n\n"
+pdf_bytes = pdf_path.read()
 
-                for page in response.full_text_annotation.pages:
-                    for block in page.blocks:
-                        for paragraph in block.paragraphs:
-                            paragraph_text = ""
-                            for word in paragraph.words:
-                                word_text = ''.join([symbol.text for symbol in word.symbols])
-                                paragraph_text += word_text + " "
+else:
 
-                            vertices = paragraph.bounding_box.vertices
-                            paragraph_boxes.append({
-                                'text': paragraph_text.strip(),
-                                'box': [(v.x, v.y) for v in vertices],
-                                'page': idx
-                            })
+pdf_bytes = pdf_path
 
-            # ✅ CLEAR MEMORY AFTER EACH PAGE
-            del img, img_byte_arr, image, response
-            if idx % 2 == 0:
-                gc.collect()
+# ✅ OPTIMIZED: Lower DPI and use JPEG
 
-            progress_bar.progress((idx + 1) / len(images))
-            time.sleep(0.3)
+images = convert_from_bytes(
 
-        progress_bar.empty()
-        gc.collect()
+pdf_bytes,
 
-        return full_text.strip(), page_images, paragraph_boxes
+dpi=150,
 
-    except Exception as e:
-        st.error(f"Error during OCR: {str(e)}")
-        return "", [], []
+fmt='jpeg',
+
+thread_count=1
+
+)
+
+# Limit pages
+
+if len(images) > max_pages:
+
+st.warning(f"⚠️ Processing first {max_pages} pages to save memory")
+
+images = images[:max_pages]
+
+full_text = ""
+
+page_images = []
+
+paragraph_boxes = []
+
+progress_bar = st.progress(0)
+
+compression_stats = []
+
+for idx, img in enumerate(images):
+
+# Store original image for display
+page_images.append(img.copy())
+
+# ✅ NEW: Compress image internally before API call
+compressed_bytes, compression_ratio = compress_image_for_api(img, quality=75)
+
+compression_stats.append({
+    'page': idx + 1,
+    'compression_ratio': compression_ratio,
+    'size_kb': len(compressed_bytes) / 1024
+})
+
+# Send compressed image to Google Vision API
+image = vision.Image(content=compressed_bytes)
+
+image_context = vision.ImageContext(language_hints=["bn", "en"])
+
+response = client.document_text_detection(image=image, image_context=image_context)
+
+if response.error.message:
+
+st.error(f"Error on page {idx + 1}: {response.error.message}")
+
+continue
+
+if response.full_text_annotation:
+
+page_text = response.full_text_annotation.text
+
+full_text += page_text + "\n\n"
+
+for page in response.full_text_annotation.pages:
+
+for block in page.blocks:
+
+for paragraph in block.paragraphs:
+
+paragraph_text = ""
+
+for word in paragraph.words:
+
+word_text = ''.join([symbol.text for symbol in word.symbols])
+
+paragraph_text += word_text + " "
+
+vertices = paragraph.bounding_box.vertices
+
+paragraph_boxes.append({
+
+'text': paragraph_text.strip(),
+
+'box': [(v.x, v.y) for v in vertices],
+
+'page': idx
+
+})
+
+# ✅ CLEAR MEMORY AFTER EACH PAGE
+
+del img, compressed_bytes, image, response
+
+if idx % 2 == 0:
+
+gc.collect()
+
+progress_bar.progress((idx + 1) / len(images))
+
+time.sleep(0.3)
+
+# Show compression stats
+progress_bar.empty()
+
+st.info("📊 **PDF Compression Summary:**")
+
+total_size = sum(s['size_kb'] for s in compression_stats)
+
+avg_compression = np.mean([s['compression_ratio'] for s in compression_stats])
+
+st.caption(f"✅ Average compression: **{avg_compression:.1f}%** | Total API payload: **{total_size:.1f} KB**")
+
+gc.collect()
+
+return full_text.strip(), page_images, paragraph_boxes
+
+except Exception as e:
+
+st.error(f"Error during OCR: {str(e)}")
+
+return "", [], []
 
 def match_sentences_to_boxes(sentences, paragraph_boxes):
-    """Match each sentence to its containing paragraph's bounding box"""
-    matched_boxes = []
 
-    for sentence in sentences:
-        best_match = None
-        best_score = 0
+"""Match each sentence to its containing paragraph's bounding box"""
 
-        for para in paragraph_boxes:
-            if sentence.strip() in para['text']:
-                score = len(sentence) / max(len(para['text']), 1)
-                if score > best_score:
-                    best_score = score
-                    best_match = para
+matched_boxes = []
 
-        if best_match:
-            matched_boxes.append({
-                'text': sentence,
-                'box': best_match['box'],
-                'page': best_match['page']
-            })
-        else:
-            matched_boxes.append({
-                'text': sentence,
-                'box': None,
-                'page': 0
-            })
+for sentence in sentences:
 
-    return matched_boxes
+best_match = None
+
+best_score = 0
+
+for para in paragraph_boxes:
+
+if sentence.strip() in para['text']:
+
+score = len(sentence) / max(len(para['text']), 1)
+
+if score > best_score:
+
+best_score = score
+
+best_match = para
+
+if best_match:
+
+matched_boxes.append({
+
+'text': sentence,
+
+'box': best_match['box'],
+
+'page': best_match['page']
+
+})
+
+else:
+
+matched_boxes.append({
+
+'text': sentence,
+
+'box': None,
+
+'page': 0
+
+})
+
+return matched_boxes
 
 def draw_highlight_on_image(image, bounding_box, color=(255, 255, 0, 100)):
-    """Draw semi-transparent highlight on image"""
-    img_copy = image.copy()
-    draw = ImageDraw.Draw(img_copy, 'RGBA')
 
-    if bounding_box and len(bounding_box) >= 2:
-        x_coords = [point[0] for point in bounding_box]
-        y_coords = [point[1] for point in bounding_box]
+"""Draw semi-transparent highlight on image"""
 
-        left = min(x_coords)
-        top = min(y_coords)
-        right = max(x_coords)
-        bottom = max(y_coords)
+img_copy = image.copy()
 
-        draw.rectangle([left, top, right, bottom],
-                      fill=color,
-                      outline=(255, 200, 0, 255),
-                      width=3)
+draw = ImageDraw.Draw(img_copy, 'RGBA')
 
-    return img_copy
+if bounding_box and len(bounding_box) >= 2:
 
-# ==================== DUAL TTS MODULE ====================
+x_coords = [point[0] for point in bounding_box]
 
-def load_facebook_tts_model():
-    """Load Facebook's free TTS model"""
-    if 'fb_tts_model' not in st.session_state:
-        with st.spinner("Loading Facebook TTS model..."):
-            model = VitsModel.from_pretrained("facebook/mms-tts-ben")
-            tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ben")
-            st.session_state.fb_tts_model = (model, tokenizer)
-    return st.session_state.fb_tts_model
+y_coords = [point[1] for point in bounding_box]
 
-def generate_audio_facebook(text, max_length=1500):
-    """Generate audio using Facebook's free TTS"""
-    try:
-        model, tokenizer = load_facebook_tts_model()
+left = min(x_coords)
 
-        if len(text) > max_length:
-            text = text[:max_length]
+top = min(y_coords)
 
-        inputs = tokenizer(text, return_tensors="pt")
+right = max(x_coords)
 
-        with torch.no_grad():
-            output = model(**inputs).waveform
+bottom = max(y_coords)
 
-        waveform = output.squeeze().cpu().numpy()
+draw.rectangle([left, top, right, bottom],
 
-        audio_buffer = io.BytesIO()
-        wavfile.write(audio_buffer, rate=16000, data=(waveform * 32767).astype(np.int16))
-        audio_buffer.seek(0)
+fill=color,
 
-        return audio_buffer.read()
+outline=(255, 200, 0, 255),
 
-    except Exception as e:
-        st.error(f"Facebook TTS Error: {str(e)}")
+width=3)
+
+return img_copy
+
+# ==================== TEXT PROCESSING ====================
+
+@st.cache_resource
+
+def load_qa_model():
+
+"""Load QA model"""
+
+return pipeline("question-answering", model="deepset/roberta-base-squad2")
+
+def semantic_chunk_text(text, chunk_size=500, overlap=100):
+
+"""Chunk text with overlap"""
+
+words = text.split()
+
+chunks = []
+
+for i in range(0, len(words), chunk_size - overlap):
+
+chunk = ' '.join(words[i:i + chunk_size])
+
+chunks.append(chunk)
+
+return chunks
+
+def setup_rag_pipeline(chunks):
+
+"""Setup RAG with FAISS and BM25"""
+
+embedder = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+
+embeddings = embedder.encode(chunks, show_progress_bar=False)
+
+embeddings = np.array(embeddings).astype('float32')
+
+dense_idx = faiss.IndexFlatL2(embeddings.shape[1])
+
+dense_idx.add(embeddings)
+
+corpus_tokens = [chunk.split() for chunk in chunks]
+
+sparse_idx = BM25Okapi(corpus_tokens)
+
+return dense_idx, sparse_idx, embedder
+
+def hybrid_search(dense_idx, sparse_idx, embedder, query, chunks, k=3, alpha=0.5):
+
+"""Hybrid search: dense + sparse"""
+
+query_embedding = embedder.encode([query])[0]
+
+query_embedding = np.array([query_embedding]).astype('float32')
+
+distances, indices = dense_idx.search(query_embedding, k)
+
+query_tokens = query.split()
+
+sparse_scores = sparse_idx.get_scores(query_tokens)
+
+combined_indices = set(indices[0].tolist() + np.argsort(sparse_scores)[-k:].tolist())
+
+relevant_chunks = [chunks[i] for i in sorted(combined_indices)[:k]]
+
+return relevant_chunks
+
+def generate_summary(text, max_length=150, min_length=50):
+
+"""Generate extractive summary"""
+
+from transformers import pipeline
+
+summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+
+summary = summarizer(text, max_length=max_length, min_length=min_length, do_sample=False)
+
+return summary[0]['summary_text']
+
+# ==================== TTS FUNCTIONS ====================
+
+def generate_audio_google(text, language_code="bn-IN"):
+    """Generate audio using Google Cloud TTS"""
+    client = get_google_tts_client()
+    if client is None:
+        st.error("Google TTS client not initialized")
         return None
-
-def generate_audio_google(text):
-    """Generate audio using Google Cloud TTS (more natural, paid)"""
+    
     try:
-        client = get_google_tts_client()
-        if client is None:
-            return None
-
         synthesis_input = texttospeech.SynthesisInput(text=text)
-
-        voice = texttospeech.VoiceSelectionParams(
-            language_code="bn-IN",  # Bengali
-            name="bn-IN-Wavenet-A",  # High quality voice
-        )
-
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
-            sample_rate_hertz=24000,
-            speaking_rate=1.0,
-            pitch=0.0
-        )
-
+        voice = texttospeech.VoiceSelectionParams(language_code=language_code)
+        audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16)
+        
         response = client.synthesize_speech(
             input=synthesis_input,
             voice=voice,
-            audio_config=audio_config
+            audio_config=audio_config,
         )
-
+        
         return response.audio_content
-
     except Exception as e:
-        st.error(f"Google TTS Error: {str(e)}")
+        st.error(f"Google TTS error: {str(e)}")
         return None
 
-def combine_wav_files(audio_bytes_list):
-    """Combine WAV files using scipy + numpy"""
+def generate_audio_facebook(text, max_length=2000):
+    """Generate audio using Facebook MMS-TTS (free)"""
     try:
-        combined_audio = []
-        sample_rate = 16000
-
-        for audio_bytes in audio_bytes_list:
-            audio_io = io.BytesIO(audio_bytes)
-            sr, audio_data = wavfile.read(audio_io)
-            combined_audio.append(audio_data)
-
-            # Add 300ms silence between chunks
-            silence = np.zeros(int(0.3 * sr), dtype=audio_data.dtype)
-            combined_audio.append(silence)
-
-        # Remove last silence
-        if combined_audio:
-            combined_audio = combined_audio[:-1]
-
-        # Concatenate all audio
-        final_audio = np.concatenate(combined_audio)
-
-        # Write to bytes
-        output = io.BytesIO()
-        wavfile.write(output, sample_rate, final_audio)
-        output.seek(0)
-
-        return output.read()
-
+        if len(text) > max_length:
+            text = text[:max_length]
+        
+        tts_pipeline = pipeline("text-to-speech", model="facebook/mms-tts-ben")
+        output = tts_pipeline(text)
+        
+        audio_np = output['audio']
+        sample_rate = output['sampling_rate']
+        
+        audio_bytes = io.BytesIO()
+        wavfile.write(audio_bytes, sample_rate, (audio_np * 32767).astype(np.int16))
+        audio_bytes.seek(0)
+        
+        return audio_bytes.getvalue()
     except Exception as e:
-        st.error(f"Combine error: {str(e)}")
+        st.error(f"Facebook TTS error: {str(e)}")
         return None
 
-def generate_audio_chunked(text, chunk_size=1500, use_google=False):
-    """Split long text into chunks and combine audio"""
-    try:
-        # Split into chunks
-        chunks = []
-        for i in range(0, len(text), chunk_size):
-            chunk = text[i:i+chunk_size]
+# ==================== UI COMPONENTS ====================
 
-            # Try to break at sentence boundary
-            if i+chunk_size < len(text):
-                last_period = chunk.rfind('।')
-                if last_period == -1:
-                    last_period = chunk.rfind('.')
-                if last_period > chunk_size * 0.7:
-                    chunk = chunk[:last_period+1]
-
-            chunks.append(chunk)
-
-        # Generate audio for each chunk
-        audio_bytes_list = []
-        for i, chunk in enumerate(chunks):
-            st.caption(f"Generating audio: chunk {i+1}/{len(chunks)}...")
-
-            if use_google:
-                audio_bytes = generate_audio_google(chunk)
-            else:
-                audio_bytes = generate_audio_facebook(chunk, max_length=chunk_size)
-
-            if audio_bytes:
-                audio_bytes_list.append(audio_bytes)
-
-        if not audio_bytes_list:
-            return None
-
-        # Combine all segments
-        st.caption("Combining audio segments...")
-        combined_audio = combine_wav_files(audio_bytes_list)
-
-        return combined_audio
-
-    except Exception as e:
-        st.error(f"Chunked audio error: {str(e)}")
-        return None
-
-# ==================== CHUNKING ====================
-def semantic_chunk_text(text, max_chunk_size=1000):
-    """Semantic chunking"""
-    sentences = re.split(r'[।.!?]\s+', text)
-    sentences = [s.strip() + '।' if not s.endswith(('।', '.', '!', '?')) else s.strip()
-                for s in sentences if s.strip()]
-
-    chunks = []
-    current_chunk = ""
-
-    for sentence in sentences:
-        if len(current_chunk) + len(sentence) <= max_chunk_size:
-            current_chunk += " " + sentence
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            current_chunk = sentence
-
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-
-    return chunks
-
-def split_into_sentences(text):
-    """Split text into sentences"""
-    sentences = re.split(r'([।.!?]\s*)', text)
-    result = []
-
-    for i in range(0, len(sentences)-1, 2):
-        if i+1 < len(sentences):
-            result.append(sentences[i] + sentences[i+1])
-        else:
-            result.append(sentences[i])
-
-    return [s.strip() for s in result if s.strip()]
-
-# ==================== RAG ====================
-@st.cache_resource
-def get_embedder():
-    return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-
-def setup_rag_pipeline(chunks):
-    embedder = get_embedder()
-    embeddings = embedder.encode(chunks, show_progress_bar=False)
-
-    dense_index = faiss.IndexFlatL2(embeddings.shape[1])
-    dense_index.add(np.array(embeddings).astype('float32'))
-
-    tokenized_chunks = [chunk.split() for chunk in chunks]
-    sparse_index = BM25Okapi(tokenized_chunks)
-
-    return dense_index, sparse_index, embedder
-
-def hybrid_search(dense_index, sparse_index, embedder, question, chunks, k=3, alpha=0.5):
-    question_embedding = embedder.encode([question])
-    dense_distances, dense_indices = dense_index.search(
-        np.array(question_embedding).astype('float32'), k*2
-    )
-
-    tokenized_question = question.split()
-    sparse_scores = sparse_index.get_scores(tokenized_question)
-    sparse_indices = np.argsort(sparse_scores)[-k*2:][::-1]
-
-    dense_scores = 1 / (1 + dense_distances[0])
-    dense_scores = dense_scores / np.sum(dense_scores)
-
-    sparse_scores_norm = sparse_scores[sparse_indices]
-    if np.sum(sparse_scores_norm) > 0:
-        sparse_scores_norm = sparse_scores_norm / np.sum(sparse_scores_norm)
-
-    combined_scores = {}
-    for idx, score in zip(dense_indices[0], dense_scores):
-        combined_scores[idx] = combined_scores.get(idx, 0) + alpha * score
-
-    for idx, score in zip(sparse_indices, sparse_scores_norm):
-        combined_scores[idx] = combined_scores.get(idx, 0) + (1 - alpha) * score
-
-    top_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:k]
-
-    return [chunks[idx] for idx, _ in top_indices]
-
-# ==================== QA ====================
-def load_qa_model():
-    if 'qa_model' not in st.session_state:
-        with st.spinner("Loading Q&A model..."):
-            model_name = "csebuetnlp/banglabert"
-            tokenizer = AutoTokenizer.from_pretrained(model_name)
-            model = AutoModelForQuestionAnswering.from_pretrained(model_name)
-            st.session_state.qa_model = pipeline('question-answering', model=model, tokenizer=tokenizer)
-    return st.session_state.qa_model
-
-# ==================== SUMMARIZATION ====================
-def generate_summary(text, max_length=200, min_length=50):
-    """Extractive summary - picks key sentences"""
-    sentences = split_into_sentences(text)
-
-    if not sentences:
-        return "No content to summarize."
-
-    # Score sentences based on length and position
-    scored = []
-    for i, sent in enumerate(sentences):
-        position_weight = 1.0 if i < 3 else 0.5
-        length_score = min(len(sent.split()) / 15.0, 1.0)
-        score = length_score * position_weight
-        scored.append((score, sent))
-
-    scored.sort(reverse=True)
-
-    # Select sentences based on desired length
-    if max_length < 150:
-        num_sentences = 3
-    elif max_length < 250:
-        num_sentences = 5
-    else:
-        num_sentences = 7
-
-    summary_sentences = [s[1] for s in scored[:num_sentences]]
-
-    return " ".join(summary_sentences)
-
-# ==================== PDF READER WITH DUAL TTS ====================
 def pdf_reader_tab():
-    """Interactive PDF reader with dual TTS options"""
-    st.subheader("📖 PDF Reader with Text-to-Speech")
-
-    if 'page_images' not in st.session_state or not st.session_state.page_images:
-        st.warning("Please process a PDF first in the sidebar")
+    """PDF Reader Tab - Page by page navigation"""
+    
+    if st.session_state.processed_text is None:
+        st.info("Upload a PDF first")
         return
-
-    # Initialize current_page
+    
+    if st.session_state.page_images is None or len(st.session_state.page_images) == 0:
+        st.error("No pages extracted")
+        return
+    
+    # Initialize session state for page navigation
     if 'current_page' not in st.session_state:
         st.session_state.current_page = 0
-
-    # Initialize page audio counter for cache management
+    
+    if 'current_sentence_idx' not in st.session_state:
+        st.session_state.current_sentence_idx = 0
+    
     if 'page_audio_counter' not in st.session_state:
         st.session_state.page_audio_counter = 0
-
+    
+    # Split text into sentences
+    sentences = nltk.sent_tokenize(st.session_state.processed_text)
+    
+    if not st.session_state.matched_sentence_boxes:
+        st.session_state.matched_sentence_boxes = match_sentences_to_boxes(
+            sentences, st.session_state.paragraph_boxes
+        )
+    
     page_idx = st.session_state.current_page
     page_num = page_idx + 1
-
-    st.markdown(f"**📄 Current Page: {page_num} of {len(st.session_state.page_images)}**")
-
-    col1, col2 = st.columns([1, 1])
-
-    with col1:
-        base_image = st.session_state.page_images[page_idx]
-        current_box = None
-
-        if ('matched_sentence_boxes' in st.session_state and
-            st.session_state.matched_sentence_boxes and
-            'current_sentence_idx' in st.session_state and
-            st.session_state.current_sentence_idx < len(st.session_state.matched_sentence_boxes)):
-
-            box_data = st.session_state.matched_sentence_boxes[st.session_state.current_sentence_idx]
-            if box_data['box'] and box_data['page'] == page_idx:
-                current_box = box_data['box']
-
-        if current_box:
-            highlighted_image = draw_highlight_on_image(base_image, current_box)
-            st.image(highlighted_image,
-                    caption=f"Page {page_num} 🟡 Highlighted",
-                    use_container_width=True)
-        else:
-            st.image(base_image,
-                    caption=f"Page {page_num}",
-                    use_container_width=True)
-
-    with col2:
-        st.markdown("**📄 Extracted Text**")
-
-        if 'processed_text' in st.session_state:
-            all_text = st.session_state.processed_text
-            sentences = split_into_sentences(all_text)
-
-            if ('matched_sentence_boxes' not in st.session_state and
-                'paragraph_boxes' in st.session_state):
-                st.session_state.matched_sentence_boxes = match_sentences_to_boxes(
-                    sentences,
-                    st.session_state.paragraph_boxes
-                )
-
-            if 'current_sentence_idx' not in st.session_state:
-                st.session_state.current_sentence_idx = 0
-
-            reading_mode = st.radio(
-                "Reading Mode:",
-                ["🎯 Manual (Line by line)", "▶️ Auto-Play (Page-by-Page Audio)"],
-                horizontal=False
-            )
-
-            if sentences:
-                current_sentence = sentences[st.session_state.current_sentence_idx]
-                st.markdown("**Current Line:**")
-                st.info(current_sentence)
-
-                # Manual mode
-                if reading_mode == "🎯 Manual (Line by line)":
-                    col_a, col_b, col_c = st.columns(3)
-
-                    with col_a:
-                        if st.button("⏮️ Previous", disabled=st.session_state.current_sentence_idx == 0):
-                            st.session_state.current_sentence_idx -= 1
-                            st.rerun()
-
-                    with col_b:
-                        if st.button("🔊 Read Aloud"):
-                            audio_data = generate_audio_facebook(current_sentence, max_length=1500)
-                            if audio_data:
-                                st.audio(audio_data, format='audio/wav', autoplay=True)
-
-                    with col_c:
-                        if st.button("⏭️ Next", disabled=st.session_state.current_sentence_idx >= len(sentences)-1):
-                            st.session_state.current_sentence_idx += 1
-                            st.rerun()
-
-                # PAGE-BY-PAGE AUDIO MODE WITH DUAL TTS
-                else:
-                    st.markdown("**🎵 Page-by-Page Audio**")
-
-                    # TTS Selection
-                    tts_option = st.radio(
-                        "Select TTS Engine:",
-                        ["🆓 Free (Facebook MMS)", "🎙️ Premium (Google Cloud - Paid after page 1)"],
-                        horizontal=True,
-                        help="Free version available always. Premium version (more natural) is free for first page only."
-                    )
-
-                    use_google = "Premium" in tts_option
-
-                    # Warning for paid usage
-                    if use_google and page_num > 1:
-                        st.warning("⚠️ You're using Premium TTS (Page 2+). This will incur Google Cloud charges.")
-                    elif use_google and page_num == 1:
-                        st.success("✅ First page is FREE with Premium TTS!")
-
-                    # Get current page sentences
-                    current_page_sentences = []
-                    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
-                        if sent_data['page'] == page_idx:
-                            current_page_sentences.append(sent_data['text'])
-
-                    if current_page_sentences:
-                        current_page_text = " ".join(current_page_sentences)
-
-                        col_a, col_b, col_c = st.columns(3)
-
-                        with col_a:
-                            if st.button("▶️ Play This Page", type="primary", use_container_width=True):
-                                # ✅ Clear previous audio cache when generating 2nd+ page
-                                if st.session_state.page_audio_counter >= 1:
-                                    st.caption("🗑️ Clearing previous audio cache...")
-                                    gc.collect()
-                                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
-
-                                with st.spinner(f"Generating audio for page {page_num}..."):
-                                    if use_google and page_num == 1:
-                                        # First page with Google TTS (free)
-                                        audio_data = generate_audio_google(current_page_text)
-                                    elif use_google and page_num > 1:
-                                        # Paid Google TTS
-                                        st.info("💰 Using paid Google TTS...")
-                                        audio_data = generate_audio_google(current_page_text)
-                                    else:
-                                        # Always free Facebook TTS
-                                        audio_data = generate_audio_facebook(current_page_text, max_length=2000)
-
-                                    if audio_data:
-                                        st.success("✅ Audio ready!")
-                                        st.audio(audio_data, format='audio/wav', autoplay=True)
-
-                                        # Increment counter and clear old audio
-                                        st.session_state.page_audio_counter += 1
-                                        del audio_data
-                                        gc.collect()
-
-                        with col_b:
-                            if st.button("⏮️ Prev Page", use_container_width=True, disabled=(page_idx == 0)):
-                                st.session_state.current_page -= 1
-                                gc.collect()
-                                st.rerun()
-
-                        with col_c:
-                            if st.button("⏭️ Next Page", use_container_width=True,
-                                       disabled=(page_idx >= len(st.session_state.page_images)-1)):
-                                st.session_state.current_page += 1
-                                gc.collect()
-                                st.rerun()
-
-                        st.caption(f"📄 Page {page_num} of {len(st.session_state.page_images)} | "
-                                 f"{len(current_page_sentences)} sentences on this page | "
-                                 f"Audio generated: {st.session_state.page_audio_counter} times")
+    
+    # Display current page image
+    st.subheader(f"📄 Page {page_num}")
+    st.image(st.session_state.page_images[page_idx], use_column_width=True)
+    
+    # Get current page sentences
+    current_page_sentences = []
+    for idx, sent_data in enumerate(st.session_state.matched_sentence_boxes):
+        if sent_data['page'] == page_idx:
+            current_page_sentences.append(sent_data['text'])
+    
+    if current_page_sentences:
+        current_page_text = " ".join(current_page_sentences)
+        
+        col_a, col_b, col_c = st.columns(3)
+        
+        with col_a:
+            if st.button("▶️ Play This Page Only", type="primary", use_container_width=True):
+                """
+                ✅ NEW: Generate audio for ONLY the current page
+                NOT all pages at once - saves memory significantly
+                """
+                
+                # Clear previous audio cache when generating new page
+                if st.session_state.page_audio_counter >= 1:
+                    st.caption("🗑️ Clearing previous audio cache...")
+                    gc.collect()
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                
+                with st.spinner(f"Generating audio for page {page_num} only..."):
+                    
+                    # Determine which TTS to use
+                    use_google = st.sidebar.checkbox("Use Google TTS (Premium)", value=False)
+                    
+                    if use_google and page_num == 1:
+                        # First page with Google TTS (free tier)
+                        audio_data = generate_audio_google(current_page_text)
+                    elif use_google and page_num > 1:
+                        # Paid Google TTS for additional pages
+                        st.info("💰 Using paid Google TTS for this page...")
+                        audio_data = generate_audio_google(current_page_text)
                     else:
-                        st.warning("No text found on this page")
-
-                st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
-                st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
-
-                with st.expander("📑 View All Sentences"):
-                    for idx, sent in enumerate(sentences):
-                        if idx == st.session_state.current_sentence_idx:
-                            st.markdown(f"**➤ {sent}**")
-                        else:
-                            st.markdown(sent)
+                        # Always free Facebook TTS
+                        audio_data = generate_audio_facebook(current_page_text, max_length=2000)
+                    
+                    if audio_data:
+                        st.success("✅ Audio ready for this page!")
+                        st.audio(audio_data, format='audio/wav', autoplay=True)
+                        
+                        # Increment counter and clear old audio
+                        st.session_state.page_audio_counter += 1
+                        del audio_data
+                        gc.collect()
+                    else:
+                        st.error("Failed to generate audio for this page")
+        
+        with col_b:
+            if st.button("⏮️ Prev Page", use_container_width=True, disabled=(page_idx == 0)):
+                st.session_state.current_page -= 1
+                gc.collect()
+                st.rerun()
+        
+        with col_c:
+            if st.button("⏭️ Next Page", use_container_width=True,
+                        disabled=(page_idx >= len(st.session_state.page_images)-1)):
+                st.session_state.current_page += 1
+                gc.collect()
+                st.rerun()
+        
+        st.caption(f"📄 Page {page_num} of {len(st.session_state.page_images)} | "
+                  f"{len(current_page_sentences)} sentences on this page | "
+                  f"🔊 Audio generated: {st.session_state.page_audio_counter} time(s)")
+    else:
+        st.warning("No text found on this page")
+    
+    st.progress((st.session_state.current_sentence_idx + 1) / len(sentences))
+    st.caption(f"Sentence {st.session_state.current_sentence_idx + 1} of {len(sentences)}")
+    
+    with st.expander("📑 View All Sentences"):
+        for idx, sent in enumerate(sentences):
+            if idx == st.session_state.current_sentence_idx:
+                st.markdown(f"**➤ {sent}**")
+            else:
+                st.markdown(sent)
 
 # ==================== MAIN APP ====================
+
 def main():
-    st.set_page_config(
-        page_title="Bengali PDF Assistant",
-        page_icon="🎓",
-        layout="wide"
-    )
 
-    st.title("🎓 Bengali PDF Assistant")
-    st.markdown("""
-    **AI-Powered Document Processing & Interactive Reading Platform**  
-    Transform your Bengali PDFs into an interactive audiobook experience with **dual TTS options**.
-    """)
+st.set_page_config(
 
-    with st.expander("📋 What This App Does - Click to Learn More", expanded=True):
-        col1, col2 = st.columns(2)
+page_title="Bengali PDF Assistant",
 
-        with col1:
-            st.markdown("""
-            **🔍 Core Services:**
-            - **OCR Text Extraction**: Convert PDF images to text using Google Vision API
-            - **Visual PDF Reader**: Read with sentence-by-sentence highlighting
-            - **Dual TTS Options**: Free (Facebook) + Premium (Google Cloud)
-            - **Smart Q&A**: Ask questions and get AI-powered answers
-            """)
+page_icon="🎓",
 
-        with col2:
-            st.markdown("""
-            **✨ Advanced Features:**
-            - **Free TTS**: Facebook MMS-TTS (always free)
-            - **Premium TTS**: Google Cloud TTS (free for 1st page, natural voice)
-            - **Auto Cache Clear**: Removes previous audio automatically
-            - **Memory Optimized**: Runs smoothly on free Streamlit tier
-            """)
+layout="wide"
 
-    # Session state
-    if 'processed_text' not in st.session_state:
-        st.session_state.processed_text = None
-    if 'page_images' not in st.session_state:
-        st.session_state.page_images = []
-    if 'paragraph_boxes' not in st.session_state:
-        st.session_state.paragraph_boxes = []
-    if 'matched_sentence_boxes' not in st.session_state:
-        st.session_state.matched_sentence_boxes = []
-    if 'chunks' not in st.session_state:
-        st.session_state.chunks = None
-    if 'rag_setup' not in st.session_state:
-        st.session_state.rag_setup = None
+)
 
-    # Sidebar
-    with st.sidebar:
-        st.header("📄 Upload PDF")
-        st.caption("Supports Bengali & English text")
+st.title("🎓 Bengali PDF Assistant")
 
-        pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
+st.markdown("""
 
-        if pdf_file and st.button("🔬 Process PDF", type="primary"):
-            max_pages = st.sidebar.slider("Pages to process", 1, 10, 3,
-                                         help="Reduce if app crashes")
+**AI-Powered Document Processing & Interactive Reading Platform**
 
-            with st.spinner("Processing with Google Vision API..."):
-                temp_path = f"temp_{int(time.time())}.pdf"
-                with open(temp_path, 'wb') as f:
-                    f.write(pdf_file.read())
+Transform your Bengali PDFs into an interactive audiobook experience with **dual TTS options**.
 
-                text, images, paragraph_boxes = extract_text_with_google_vision(
-                    temp_path,
-                    max_pages=max_pages
-                )
+""")
 
-                os.remove(temp_path)
+with st.expander("📋 What This App Does - Click to Learn More", expanded=True):
 
-                if text:
-                    st.session_state.processed_text = text
-                    st.session_state.page_images = images
-                    st.session_state.paragraph_boxes = paragraph_boxes
-                    st.session_state.chunks = semantic_chunk_text(text)
-                    st.session_state.rag_setup = setup_rag_pipeline(st.session_state.chunks)
-                    st.session_state.current_sentence_idx = 0
-                    st.session_state.page_audio_counter = 0  # Reset counter
+col1, col2 = st.columns(2)
 
-                    if 'matched_sentence_boxes' in st.session_state:
-                        del st.session_state.matched_sentence_boxes
+with col1:
 
-                    st.success(f"✅ Extracted {len(text)} characters")
-                    st.caption(f"📄 {len(images)} pages processed")
-                else:
-                    st.error("Failed to extract text")
+st.markdown("""
 
-        st.header("🎙️ TTS Options")
-        st.success("✅ Dual TTS Available")
-        st.caption("• Free: Facebook MMS-TTS")
-        st.caption("• Premium: Google Cloud (1st page free)")
+**🔍 Core Services:**
 
-        st.header("💾 Memory Status")
-        st.success("✅ Auto cache clearing enabled")
-        st.caption("• Previous audio deleted automatically")
-        st.caption("• Memory optimized for 1GB RAM")
+- **OCR Text Extraction**: Convert PDF images to text using Google Vision API
 
-    if st.session_state.processed_text is None:
-        st.info("👈 Upload a PDF from the sidebar to get started")
+- **Visual PDF Reader**: Read with page-by-page navigation
 
-        st.markdown("### 🎯 Our Services")
-        col1, col2, col3, col4 = st.columns(4)
+- **Dual TTS Options**: Free (Facebook) + Premium (Google Cloud)
 
-        with col1:
-            st.markdown("""
-            #### 📖 PDF Reader
-            **Interactive Reading**
-            - Visual highlighting
-            - Line-by-line navigation
-            - Dual TTS options
-            - Auto-Play mode
-            """)
+- **Smart Q&A**: Ask questions and get AI-powered answers
 
-        with col2:
-            st.markdown("""
-            #### 💬 Smart Q&A
-            **Ask Anything**
-            - Semantic search
-            - Context-aware answers
-            - Confidence scores
-            - Hybrid retrieval
-            """)
+""")
 
-        with col3:
-            st.markdown("""
-            #### 📝 Summarization
-            **Quick Overview**
-            - Short/Medium/Long
-            - Memory-efficient
-            - Instant results
-            - Extractive method
-            """)
+with col2:
 
-        with col4:
-            st.markdown("""
-            #### 🔊 Dual TTS
-            **Listen Your Way**
-            - Free option (Facebook)
-            - Premium option (Google)
-            - Natural voices
-            - Auto cache clear
-            """)
+st.markdown("""
 
-    else:
-        # Main tabs
-        tabs = st.tabs(["📖 PDF Reader", "💬 Q&A", "📝 Summary", "📄 Full Text"])
+**✨ Advanced Features:**
 
-        with tabs[0]:
-            pdf_reader_tab()
+- **🎯 Per-Page Audio Generation**: Generate audio for one page at a time (memory efficient)
 
-        with tabs[1]:
-            st.subheader("💬 Smart Question Answering")
-            st.caption("Powered by BanglaBERT + Hybrid RAG")
+- **🗜️ Internal PDF Compression**: Automatically compress images before API calls
 
-            question = st.text_input("Your question:")
+- **🔊 Free TTS**: Facebook MMS-TTS (always free)
 
-            if st.button("💡 Get Answer", type="primary"):
-                if question:
-                    with st.spinner("Searching..."):
-                        dense_idx, sparse_idx, embedder = st.session_state.rag_setup
-                        relevant_chunks = hybrid_search(
-                            dense_idx, sparse_idx, embedder, question,
-                            st.session_state.chunks, k=3, alpha=0.5
-                        )
+- **💎 Premium TTS**: Google Cloud TTS (free for 1st page, natural voice)
 
-                        context = "\n---\n".join(relevant_chunks)
+- **Auto Cache Clear**: Removes previous audio automatically
 
-                        qa_pipeline = load_qa_model()
-                        result = qa_pipeline(question=question, context=context)
+- **Memory Optimized**: Runs smoothly on free Streamlit tier
 
-                        st.success(f"**Answer:** {result['answer']}")
-                        st.info(f"**Confidence:** {result['score']:.2%}")
+""")
 
-                        with st.expander("📚 Retrieved Context"):
-                            st.text(context)
-                else:
-                    st.warning("Please enter a question")
+# Session state
 
-        with tabs[2]:
-            st.subheader("📝 Extractive Summarization")
-            st.caption("⚡ No heavy models - instant results!")
+if 'processed_text' not in st.session_state:
 
-            summary_length = st.radio("Length", ["Short", "Medium", "Long"], index=1, horizontal=True)
+st.session_state.processed_text = None
 
-            if st.button("📄 Generate Summary", type="primary"):
-                length_map = {"Short": (30, 100), "Medium": (50, 200), "Long": (100, 300)}
-                min_len, max_len = length_map[summary_length]
+if 'page_images' not in st.session_state:
 
-                summary = generate_summary(
-                    st.session_state.processed_text,
-                    max_length=max_len,
-                    min_length=min_len
-                )
+st.session_state.page_images = []
 
-                st.write("**Summary:**")
-                st.write(summary)
+if 'paragraph_boxes' not in st.session_state:
 
-        with tabs[3]:
-            st.subheader("📄 Full Extracted Text")
-            st.text_area("Document Text", st.session_state.processed_text, height=400, label_visibility="hidden")
+st.session_state.paragraph_boxes = []
+
+if 'matched_sentence_boxes' not in st.session_state:
+
+st.session_state.matched_sentence_boxes = []
+
+if 'chunks' not in st.session_state:
+
+st.session_state.chunks = None
+
+if 'rag_setup' not in st.session_state:
+
+st.session_state.rag_setup = None
+
+# Sidebar
+
+with st.sidebar:
+
+st.header("📄 Upload PDF")
+
+st.caption("Supports Bengali & English text")
+
+pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
+
+if pdf_file and st.button("🔬 Process PDF", type="primary"):
+
+max_pages = st.sidebar.slider("Pages to process", 1, 10, 3,
+
+help="Reduce if app crashes")
+
+with st.spinner("Processing with Google Vision API..."):
+
+temp_path = f"temp_{int(time.time())}.pdf"
+
+with open(temp_path, 'wb') as f:
+
+f.write(pdf_file.read())
+
+text, images, paragraph_boxes = extract_text_with_google_vision(
+
+temp_path,
+
+max_pages=max_pages
+
+)
+
+os.remove(temp_path)
+
+if text:
+
+st.session_state.processed_text = text
+
+st.session_state.page_images = images
+
+st.session_state.paragraph_boxes = paragraph_boxes
+
+st.session_state.chunks = semantic_chunk_text(text)
+
+st.session_state.rag_setup = setup_rag_pipeline(st.session_state.chunks)
+
+st.session_state.current_sentence_idx = 0
+
+st.session_state.page_audio_counter = 0 # Reset counter
+
+if 'matched_sentence_boxes' in st.session_state:
+
+del st.session_state.matched_sentence_boxes
+
+st.success(f"✅ Extracted {len(text)} characters")
+
+st.caption(f"📄 {len(images)} pages processed")
+
+else:
+
+st.error("Failed to extract text")
+
+st.header("🎙️ TTS Options")
+
+use_google = st.checkbox("Use Google TTS (Premium)", value=False)
+
+st.success("✅ Dual TTS Available")
+
+st.caption("• Free: Facebook MMS-TTS")
+
+st.caption("• Premium: Google Cloud (1st page free)")
+
+st.header("💾 Memory Status")
+
+st.success("✅ Per-page audio + auto cache clearing enabled")
+
+st.caption("• Audio generated per-page only (not all at once)")
+
+st.caption("• Previous audio deleted automatically")
+
+st.caption("• PDFs compressed internally before API calls")
+
+if st.session_state.processed_text is None:
+
+st.info("👈 Upload a PDF from the sidebar to get started")
+
+st.markdown("### 🎯 Our Services")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
+
+st.markdown("""
+
+#### 📖 PDF Reader
+
+**Interactive Reading**
+
+- Page-by-page navigation
+
+- Per-page audio generation
+
+- Dual TTS options
+
+- Low memory footprint
+
+""")
+
+with col2:
+
+st.markdown("""
+
+#### 💬 Smart Q&A
+
+**Ask Anything**
+
+- Semantic search
+
+- Context-aware answers
+
+- Confidence scores
+
+- Hybrid retrieval
+
+""")
+
+with col3:
+
+st.markdown("""
+
+#### 📝 Summarization
+
+**Quick Overview**
+
+- Short/Medium/Long
+
+- Memory-efficient
+
+- Instant results
+
+- Extractive method
+
+""")
+
+with col4:
+
+st.markdown("""
+
+#### 🔊 Dual TTS
+
+**Listen Your Way**
+
+- Free option (Facebook)
+
+- Premium option (Google)
+
+- Natural voices
+
+- Auto cache clear
+
+""")
+
+else:
+
+# Main tabs
+
+tabs = st.tabs(["📖 PDF Reader", "💬 Q&A", "📝 Summary", "📄 Full Text"])
+
+with tabs[0]:
+
+pdf_reader_tab()
+
+with tabs[1]:
+
+st.subheader("💬 Smart Question Answering")
+
+st.caption("Powered by BanglaBERT + Hybrid RAG")
+
+question = st.text_input("Your question:")
+
+if st.button("💡 Get Answer", type="primary"):
+
+if question:
+
+with st.spinner("Searching..."):
+
+dense_idx, sparse_idx, embedder = st.session_state.rag_setup
+
+relevant_chunks = hybrid_search(
+
+dense_idx, sparse_idx, embedder, question,
+
+st.session_state.chunks, k=3, alpha=0.5
+
+)
+
+context = "\n---\n".join(relevant_chunks)
+
+qa_pipeline = load_qa_model()
+
+result = qa_pipeline(question=question, context=context)
+
+st.success(f"**Answer:** {result['answer']}")
+
+st.info(f"**Confidence:** {result['score']:.2%}")
+
+with st.expander("📚 Retrieved Context"):
+
+st.text(context)
+
+else:
+
+st.warning("Please enter a question")
+
+with tabs[2]:
+
+st.subheader("📝 Extractive Summarization")
+
+st.caption("⚡ No heavy models - instant results!")
+
+summary_length = st.radio("Length", ["Short", "Medium", "Long"], index=1, horizontal=True)
+
+if st.button("📄 Generate Summary", type="primary"):
+
+length_map = {"Short": (30, 100), "Medium": (50, 200), "Long": (100, 300)}
+
+min_len, max_len = length_map[summary_length]
+
+summary = generate_summary(
+
+st.session_state.processed_text,
+
+max_length=max_len,
+
+min_length=min_len
+
+)
+
+st.write("**Summary:**")
+
+st.write(summary)
+
+with tabs[3]:
+
+st.subheader("📄 Full Extracted Text")
+
+st.text_area("Document Text", st.session_state.processed_text, height=400, label_visibility="hidden")
 
 if __name__ == "__main__":
-    main()
+
+main()
