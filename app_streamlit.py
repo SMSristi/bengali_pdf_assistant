@@ -31,39 +31,44 @@ torch.set_num_threads(1)
 os.environ['TOKENIZERS_PARALLELISM'] = 'false'
 
 # ==================== PDF COMPRESSION ====================
-def compress_pdf(pdf_bytes, quality=2):
+def compress_pdf(pdf_bytes, quality="medium"):
     """
-    Compress PDF to save memory
-    quality: 0 (max compression) to 4 (max quality), default 2
-    Returns compressed PDF bytes
+    Compress PDF internally to save memory
+    quality: "low", "medium", "high"
     """
     try:
-        from PyPDF2 import PdfReader, PdfWriter
+        pdf_io = io.BytesIO(pdf_bytes)
+        reader = PdfReader(pdf_io)
+        writer = PdfWriter()
 
-        # Read PDF
-        pdf_reader = PdfReader(io.BytesIO(pdf_bytes))
-        pdf_writer = PdfWriter()
+        # Copy pages to writer
+        for page in reader.pages:
+            # Remove images if quality is low
+            if quality == "low":
+                page.compress_content_streams()
+            writer.add_page(page)
 
-        # Copy pages and compress
-        for page in pdf_reader.pages:
-            page.compress_content_streams()  # This is CPU intensive!
-            pdf_writer.add_page(page)
+        # Compress
+        if quality == "low":
+            writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+        elif quality == "medium":
+            writer.compress_identical_objects(remove_identicals=True)
 
-        # Write compressed PDF
-        compressed_buffer = io.BytesIO()
-        pdf_writer.write(compressed_buffer)
-        compressed_buffer.seek(0)
-        compressed_bytes = compressed_buffer.read()
+        # Write to bytes
+        compressed_io = io.BytesIO()
+        writer.write(compressed_io)
+        compressed_io.seek(0)
+        compressed_bytes = compressed_io.read()
 
         original_size = len(pdf_bytes)
         compressed_size = len(compressed_bytes)
-        compression_ratio = (1 - compressed_size/original_size) * 100
+        ratio = (1 - compressed_size / original_size) * 100
 
-        st.success(f"✅ PDF Compressed: {original_size/1024:.1f}KB → {compressed_size/1024:.1f}KB ({compression_ratio:.1f}% reduction)")
+        st.caption(f"📦 PDF compressed: {original_size/1024:.1f}KB → {compressed_size/1024:.1f}KB ({ratio:.1f}% reduction)")
 
         return compressed_bytes
     except Exception as e:
-        st.warning(f"⚠️ PDF compression failed: {str(e)}. Using original PDF.")
+        st.warning(f"⚠️ PDF compression failed: {str(e)}, using original")
         return pdf_bytes
 
 # ==================== GOOGLE VISION API ====================
@@ -118,8 +123,8 @@ def extract_text_with_google_vision(pdf_path, max_pages=3):
         else:
             pdf_bytes = pdf_path
 
-        # ✅ NEW: Compress PDF before processing
-        pdf_bytes = compress_pdf(pdf_bytes)
+        # ✅ NEW: Compress PDF internally
+        pdf_bytes = compress_pdf(pdf_bytes, quality="medium")
 
         # ✅ OPTIMIZED: Lower DPI and use JPEG
         images = convert_from_bytes(
@@ -137,7 +142,6 @@ def extract_text_with_google_vision(pdf_path, max_pages=3):
         full_text = ""
         page_images = []
         paragraph_boxes = []
-
         progress_bar = st.progress(0)
 
         for idx, img in enumerate(images):
@@ -154,7 +158,6 @@ def extract_text_with_google_vision(pdf_path, max_pages=3):
 
             image = vision.Image(content=img_byte_arr)
             image_context = vision.ImageContext(language_hints=["bn", "en"])
-
             response = client.document_text_detection(image=image, image_context=image_context)
 
             if response.error.message:
@@ -200,7 +203,6 @@ def extract_text_with_google_vision(pdf_path, max_pages=3):
 def match_sentences_to_boxes(sentences, paragraph_boxes):
     """Match each sentence to its containing paragraph's bounding box"""
     matched_boxes = []
-
     for sentence in sentences:
         best_match = None
         best_score = 0
@@ -256,7 +258,6 @@ def load_facebook_tts_model():
             model = VitsModel.from_pretrained("facebook/mms-tts-ben")
             tokenizer = AutoTokenizer.from_pretrained("facebook/mms-tts-ben")
             st.session_state.fb_tts_model = (model, tokenizer)
-
     return st.session_state.fb_tts_model
 
 def generate_audio_facebook(text, max_length=1500):
@@ -321,7 +322,7 @@ def generate_audio_google(text):
 def semantic_chunk_text(text, max_chunk_size=1000):
     """Semantic chunking"""
     sentences = re.split(r'[।.!?]\s+', text)
-    sentences = [s.strip() + '।' if not s.endswith(('।', '.', '!', '?')) else s.strip() 
+    sentences = [s.strip() + '।' if not s.endswith(('।', '.', '!', '?')) else s.strip()
                  for s in sentences if s.strip()]
 
     chunks = []
@@ -344,6 +345,7 @@ def split_into_sentences(text):
     """Split text into sentences"""
     sentences = re.split(r'([।.!?]\s*)', text)
     result = []
+
     for i in range(0, len(sentences)-1, 2):
         if i+1 < len(sentences):
             result.append(sentences[i] + sentences[i+1])
@@ -394,7 +396,6 @@ def hybrid_search(dense_index, sparse_index, embedder, question, chunks, k=3, al
         combined_scores[idx] = combined_scores.get(idx, 0) + (1 - alpha) * score
 
     top_indices = sorted(combined_scores.items(), key=lambda x: x[1], reverse=True)[:k]
-
     return [chunks[idx] for idx, _ in top_indices]
 
 # ==================== QA ====================
@@ -405,14 +406,12 @@ def load_qa_model():
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             model = AutoModelForQuestionAnswering.from_pretrained(model_name)
             st.session_state.qa_model = pipeline('question-answering', model=model, tokenizer=tokenizer)
-
     return st.session_state.qa_model
 
 # ==================== SUMMARIZATION ====================
 def generate_summary(text, max_length=200, min_length=50):
     """Extractive summary - picks key sentences"""
     sentences = split_into_sentences(text)
-
     if not sentences:
         return "No content to summarize."
 
@@ -437,9 +436,9 @@ def generate_summary(text, max_length=200, min_length=50):
     summary_sentences = [s[1] for s in scored[:num_sentences]]
     return " ".join(summary_sentences)
 
-# ==================== PDF READER WITH ON-DEMAND AUDIO ====================
+# ==================== PDF READER WITH ON-DEMAND TTS ====================
 def pdf_reader_tab():
-    """Interactive PDF reader with on-demand page audio"""
+    """Interactive PDF reader with on-demand TTS"""
     st.subheader("📖 PDF Reader with Text-to-Speech")
 
     if 'page_images' not in st.session_state or not st.session_state.page_images:
@@ -461,7 +460,7 @@ def pdf_reader_tab():
         base_image = st.session_state.page_images[page_idx]
         current_box = None
 
-        if ('matched_sentence_boxes' in st.session_state and 
+        if ('matched_sentence_boxes' in st.session_state and
             st.session_state.matched_sentence_boxes and
             'current_sentence_idx' in st.session_state and
             st.session_state.current_sentence_idx < len(st.session_state.matched_sentence_boxes)):
@@ -472,12 +471,12 @@ def pdf_reader_tab():
 
         if current_box:
             highlighted_image = draw_highlight_on_image(base_image, current_box)
-            st.image(highlighted_image, 
-                    caption=f"Page {page_num} 🟡 Highlighted", 
+            st.image(highlighted_image,
+                    caption=f"Page {page_num} 🟡 Highlighted",
                     use_container_width=True)
         else:
-            st.image(base_image, 
-                    caption=f"Page {page_num}", 
+            st.image(base_image,
+                    caption=f"Page {page_num}",
                     use_container_width=True)
 
     with col2:
@@ -487,10 +486,10 @@ def pdf_reader_tab():
             all_text = st.session_state.processed_text
             sentences = split_into_sentences(all_text)
 
-            if ('matched_sentence_boxes' not in st.session_state and 
+            if ('matched_sentence_boxes' not in st.session_state and
                 'paragraph_boxes' in st.session_state):
                 st.session_state.matched_sentence_boxes = match_sentences_to_boxes(
-                    sentences, 
+                    sentences,
                     st.session_state.paragraph_boxes
                 )
 
@@ -499,7 +498,7 @@ def pdf_reader_tab():
 
             reading_mode = st.radio(
                 "Reading Mode:",
-                ["🎯 Manual (Line by line)", "▶️ Page-by-Page Audio (On-Demand)"],
+                ["🎯 Manual (Line by line)", "▶️ Auto-Play (Page-by-Page Audio)"],
                 horizontal=False
             )
 
@@ -518,19 +517,23 @@ def pdf_reader_tab():
                             st.rerun()
 
                     with col_b:
+                        # ✅ CHANGED: Audio generated only on button click
                         if st.button("🔊 Read Aloud"):
-                            audio_data = generate_audio_facebook(current_sentence, max_length=1500)
-                            if audio_data:
-                                st.audio(audio_data, format='audio/wav', autoplay=True)
+                            with st.spinner("Generating audio..."):
+                                audio_data = generate_audio_facebook(current_sentence, max_length=1500)
+                                if audio_data:
+                                    st.audio(audio_data, format='audio/wav', autoplay=True)
+                                    del audio_data
+                                    gc.collect()
 
                     with col_c:
                         if st.button("⏭️ Next", disabled=st.session_state.current_sentence_idx >= len(sentences)-1):
                             st.session_state.current_sentence_idx += 1
                             st.rerun()
 
-                # ✅ MODIFIED: ON-DEMAND PAGE AUDIO (No pre-generation)
+                # PAGE-BY-PAGE AUDIO MODE WITH DUAL TTS
                 else:
-                    st.markdown("**🎵 Page-by-Page Audio (On-Demand)**")
+                    st.markdown("**🎵 Page-by-Page Audio**")
 
                     # TTS Selection
                     tts_option = st.radio(
@@ -560,7 +563,7 @@ def pdf_reader_tab():
                         col_a, col_b, col_c = st.columns(3)
 
                         with col_a:
-                            # ✅ MODIFIED: Generate audio ONLY when button is clicked
+                            # ✅ CHANGED: Audio generated only when Play button is clicked
                             if st.button("▶️ Play This Page", type="primary", use_container_width=True):
                                 with st.spinner(f"Generating audio for page {page_num}..."):
                                     if use_google and page_num == 1:
@@ -577,7 +580,7 @@ def pdf_reader_tab():
                                     if audio_data:
                                         st.success("✅ Audio ready!")
                                         st.audio(audio_data, format='audio/wav', autoplay=True)
-                                        # Clear audio immediately after playing
+                                        # ✅ CHANGED: Immediately clear audio from memory
                                         del audio_data
                                         gc.collect()
 
@@ -588,7 +591,7 @@ def pdf_reader_tab():
                                 st.rerun()
 
                         with col_c:
-                            if st.button("⏭️ Next Page", use_container_width=True, 
+                            if st.button("⏭️ Next Page", use_container_width=True,
                                        disabled=(page_idx >= len(st.session_state.page_images)-1)):
                                 st.session_state.current_page += 1
                                 gc.collect()
@@ -620,7 +623,6 @@ def main():
     st.title("🎓 Bengali PDF Assistant")
     st.markdown("""
     **AI-Powered Document Processing & Interactive Reading Platform**
-
     Transform your Bengali PDFs into an interactive audiobook experience with **dual TTS options**.
     """)
 
@@ -641,8 +643,8 @@ def main():
             **✨ Advanced Features:**
             - **Free TTS**: Facebook MMS-TTS (always free)
             - **Premium TTS**: Google Cloud TTS (free for 1st page, natural voice)
-            - **On-Demand Audio**: Generate audio only when needed
-            - **PDF Compression**: Automatic compression to save memory
+            - **PDF Compression**: Automatic internal compression to save memory
+            - **Memory Optimized**: Runs smoothly on free Streamlit tier
             """)
 
     # Session state
@@ -667,7 +669,7 @@ def main():
         pdf_file = st.file_uploader("Choose a Bengali PDF", type=['pdf'])
 
         if pdf_file and st.button("🔬 Process PDF", type="primary"):
-            max_pages = st.sidebar.slider("Pages to process", 1, 10, 3, 
+            max_pages = st.sidebar.slider("Pages to process", 1, 10, 3,
                                          help="Reduce if app crashes")
 
             with st.spinner("Processing with Google Vision API..."):
@@ -676,7 +678,7 @@ def main():
                     f.write(pdf_file.read())
 
                 text, images, paragraph_boxes = extract_text_with_google_vision(
-                    temp_path, 
+                    temp_path,
                     max_pages=max_pages
                 )
 
@@ -704,9 +706,9 @@ def main():
         st.caption("• Premium: Google Cloud (1st page free)")
 
         st.header("💾 Memory Status")
-        st.success("✅ On-demand audio generation")
-        st.caption("• Audio generated only when requested")
-        st.caption("• Memory optimized for 1GB RAM")
+        st.success("✅ Auto memory management")
+        st.caption("• Audio generated on-demand only")
+        st.caption("• PDF compressed internally")
 
     if st.session_state.processed_text is None:
         st.info("👈 Upload a PDF from the sidebar to get started")
@@ -721,7 +723,7 @@ def main():
             - Visual highlighting
             - Line-by-line navigation
             - Dual TTS options
-            - On-demand audio
+            - Auto-Play mode
             """)
 
         with col2:
@@ -766,17 +768,18 @@ def main():
             st.caption("Powered by BanglaBERT + Hybrid RAG")
 
             question = st.text_input("Your question:")
+
             if st.button("💡 Get Answer", type="primary"):
                 if question:
                     with st.spinner("Searching..."):
                         dense_idx, sparse_idx, embedder = st.session_state.rag_setup
+
                         relevant_chunks = hybrid_search(
                             dense_idx, sparse_idx, embedder, question,
                             st.session_state.chunks, k=3, alpha=0.5
                         )
 
                         context = "\n---\n".join(relevant_chunks)
-
                         qa_pipeline = load_qa_model()
                         result = qa_pipeline(question=question, context=context)
 
