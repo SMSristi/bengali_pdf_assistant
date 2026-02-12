@@ -162,11 +162,8 @@ MIT License - see LICENSE file for details
 
 ## 📧 Contact
 
-**Your Name**  
-Research Assistant, CUET  
-[Your Email]  
-[Your LinkedIn]  
-[Your GitHub]
+**SM Sristi**  
+Research Assistant, CUET
 
 ---
 
